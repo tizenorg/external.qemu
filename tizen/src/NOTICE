@@ -1,0 +1,2 @@
+2011-12-16 Munkyu Im <munkyu.im@samsung.com>
+	* debug_ch.c, debug_ch.h, debug_ch_vtm.c, debug_ch_vtm.h : Add redirction to file.

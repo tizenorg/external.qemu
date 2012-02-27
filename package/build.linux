@@ -1,0 +1,40 @@
+#!/bin/sh -xe
+# clean
+clean()
+{
+	cd $SRCDIR/tizen/
+	if test -e "Makefile"
+	then
+		make clean
+	fi
+	rm -rf $SRCDIR/*.zip
+	rm -rf $SRCDIR/*.tar.gz
+}
+
+# build
+build() 
+{
+	cd $SRCDIR/tizen/
+	autoconf
+	./configure
+	make
+}
+
+# install
+install() 
+{
+	BIN_DIR=$SRCDIR/package/emulator.package.linux/data
+	mkdir -p $BIN_DIR
+
+    cd $SRCDIR/tizen
+    make install
+	mv Emulator $BIN_DIR
+	cp $SRCDIR/package/emulator.install.linux $BIN_DIR/../
+	cp $SRCDIR/package/emulator.remove.linux $BIN_DIR/../
+}
+
+[ "$1" = "clean" ] && clean
+[ "$1" = "build" ] && build
+[ "$1" = "install" ] && install
+
+echo "success"

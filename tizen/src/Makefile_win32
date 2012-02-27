@@ -1,0 +1,87 @@
+include ./qemu/config-host.mak
+
+CC = gcc
+
+CC = gcc -mno-cygwin
+PREFIX = /usr/local
+	
+GLIB_CFLAGS = $(shell $(PREFIX)/bin/pkg-config --cflags glib-2.0)
+GLIB_LIBS   = $(shell $(PREFIX)/bin/pkg-config --libs glib-2.0)
+	
+GTK_CFLAGS  = $(shell $(PREFIX)/bin/pkg-config --cflags gtk+-2.0)
+GTK_LIBS    = $(shell $(PREFIX)/bin/pkg-config --libs gtk+-2.0)
+
+XML_CFLAGS = -I$(PREFIX)/include/libxml2
+XML_LIBS = -L$(PREFIX)/lib -lxml2 
+
+CFLAGS	= -Wall -g -mwindows
+
+SDL_LIBS=-mno-cygwin -mwindows -LC:/cygwin/usr/local/lib -lmingw32 -lSDLmain -lSDL_image -lSDL_gfx -lSDL 
+SDL_CFLAGS=-mno-cygwin -Dmain=SDL_main -IC:/cygwin/usr/local/include/SDL -I/usr/include/mingw 
+DEBUG = y
+STRIP = strip
+TARGET = simulator
+EMUL_LIB = libsimulator.a
+
+DEFS = -DISE_DEBUG -DISE_LOGGING 
+CFLAGS  = -Wall -g -DEMTRACE_I878
+CFLAGS += -Wall -g $(DEFS) $(GLIB_CFLAGS) $(GTK_CFLAGS) $(XML_CFLAGS) $(SDL_CFLAGS) -I../lib/libcommon/ -I../lib/libui/ -I./qemu -I./qemu/i386-softmmu
+
+OBJS = simulator.o \
+		about_version.o \
+		configuration.o \
+		command.o \
+		compass.o \
+		option.o \
+		option_callback.o \
+		tools.o \
+		systeminfo.o \
+		dbi_parser.o \
+		simsignal.o \
+		vinit_process.o \
+		menu.o \
+		gps.o \
+		menu_callback.o \
+		screen_shot.o\
+		event_handler.o\
+		qemu_gtk_widget.o
+
+SRCS = $(OBJS:%.o=%.c)
+
+.SUFFIXES: .c
+INC = 
+
+LIBS    += ../lib/libcommon/libcommon.a \
+		   ../lib/libui/libui.a \
+		   ./qemu/i386-softmmu/libccc.a \
+			  -L../lib/libui -L../lib/libcommon -L./qemu  -L./qemu/i386-softmmu -lui -lcommon -lccc -lz $(GLIB_LIBS) $(XML_LIBS) $(GTK_LIBS) -ldxguid -lole32 -lopengl32
+
+all = $(TARGET)
+
+$(TARGET): $(OBJS)
+	find ./ -name "*.d" | xargs rm -rf	
+	make -C ../lib/libcommon/
+	make -C ../lib/libui/
+	make -C ./qemu/
+	$(CC) -o $(TARGET) $(OBJS) $(LIBS) $(CONFIG_VNC_TLS_LIBS) $(AIOLIBS) -lutil -lcurses -lwinmm -lws2_32 -liphlpapi $(SDL_LIBS) -mconsole
+
+.c.o:
+	$(CC) -c $(CFLAGS) -o $@ $<
+
+install: $(OBJS)
+	install -m4755 $(TARGET) $(PHONE_DIR)/bin/$(TARGET)	
+
+lib : 
+	make -C ../lib/libcommon/
+	make -C ../lib/libui/
+
+dep :
+	gccmakedep $(INC) $(SRCS) 
+
+clean:
+	rm -rf *.o
+	rm -rf ../lib/libcommon/*.o ../lib/libcommon/*.a
+	rm -rf ../lib/libui/*.o ../lib/libui/*.a
+	rm -rf simulator
+	rm -rf ./qemu/*.o ./qemu/*.a ./qemu/i386-softmmu/*.o ./qemu/i386-softmmu/*.a
+

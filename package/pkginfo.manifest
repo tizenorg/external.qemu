@@ -1,0 +1,17 @@
+Package: emulator
+Version: 1.2.22
+OS: linux
+Build-host-os: linux
+Maintainer: Yeong-Kyoon Lee<yeongkyoon.lee@samsung.com>
+Install-dependency: emulator-kernel [ linux ]
+Source: emulator
+Description: Tizen Emulator
+
+Package: emulator
+Version: 1.2.22
+OS: windows
+Build-host-os: windows
+Maintainer: Yeong-Kyoon Lee<yeongkyoon.lee@samsung.com>
+Install-dependency: emulator-kernel [ windows ],emulator-dll [ windows ]
+Source: emulator
+Description: Tizen Emulator
