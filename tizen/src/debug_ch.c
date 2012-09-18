@@ -33,12 +33,35 @@
 #include <string.h>
 #include <assert.h>
 #include <unistd.h>
-#include "debug_ch.h"
-#include "fileio.h"
+#include "qemu-common.h"
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <errno.h>
+#endif
 
-extern STARTUP_OPTION startup_option;
-static char logfile[256] = { 0, };
-static char debugchfile[256] = {0, };
+#include "emulator.h"
+#include "debug_ch.h"
+
+// DEBUGCH file is located in binary directory.
+char bin_dir[256] = {0,};
+
+static char logpath[512] = {0,};
+static char debugchfile[512] = {0, };
+#ifdef _WIN32
+static HANDLE handle;
+#endif
+
+void set_log_path(char *path)
+{
+    strcpy(logpath, path);
+}
+
+char *get_log_path(void)
+{
+    return logpath;
+}
+
 static inline int interlocked_xchg_add( int *dest, int incr )
 {
 	int ret;
@@ -72,6 +95,7 @@ unsigned char _dbg_get_channel_flags( struct _debug_channel *channel )
 		debug_init();
 
 	if(nb_debug_options){
+        		
 		struct _debug_channel *opt;
 
 		/* first check for multi channel */
@@ -252,13 +276,30 @@ static void debug_init(void)
 	char *debug = NULL;
 	FILE *fp = NULL;
 	char *tmp = NULL;
+    int open_flags;
+    int fd;
 
-	if (nb_debug_options != -1)
+    if (nb_debug_options != -1)
 		return;  /* already initialized */
 
 	nb_debug_options = 0;
+
+#if 0
 	strcpy(debugchfile, get_etc_path());
 	strcat(debugchfile, "/DEBUGCH");
+#endif
+
+    if ( 0 == strlen( bin_dir ) ) {
+        strcpy( debugchfile, "DEBUGCH" );
+    } else {
+        strcat( debugchfile, bin_dir );
+#ifdef _WIN32
+        strcat( debugchfile, "\\" );
+#else
+        strcat( debugchfile, "/" );
+#endif
+        strcat( debugchfile, "DEBUGCH" );
+    }
 
 	fp= fopen(debugchfile, "r");
 	if( fp == NULL){
@@ -288,12 +329,14 @@ static void debug_init(void)
 	if( tmp != NULL ){
 		free(tmp);
 	}
-
-	strcpy(logfile, get_virtual_target_log_path(startup_option.vtm));
-	strcat(logfile, EMUL_LOGFILE);
-
-	if(access(logfile, F_OK | R_OK) == 0)
-		remove(logfile);
+	
+	open_flags = O_BINARY | O_RDWR | O_CREAT | O_TRUNC;
+	fd = qemu_open(logpath, open_flags, 0666);
+    if(fd < 0) {
+        fprintf(stderr, "Can't open logfile: %s\n", logpath);
+    	exit(1);
+    }
+    close(fd);
 }
 
 /* allocate some tmp string space */
@@ -337,7 +380,7 @@ static int dbg_vprintf( const char *format, va_list args )
 	sprintf(txt, "%s", tmp);
 
 	// unlock
-	if ((fp = fopen(logfile, "a+")) == NULL) {
+	if ((fp = fopen(logpath, "a+")) == NULL) {
 		fprintf(stdout, "Emulator can't open.\n"
 				"Please check if "
 				"this binary file is running on the right path.\n");
@@ -346,7 +389,6 @@ static int dbg_vprintf( const char *format, va_list args )
 
 	fputs(txt, fp);
 	fclose(fp);
-
 	return ret;
 }
 
@@ -399,9 +441,10 @@ int dbg_log( enum _debug_class cls, struct _debug_channel *channel,
 	int ret = 0;
 	char buf[2048];
 	va_list valist;
-	FILE *fp;
-	
-	if (!(_dbg_get_channel_flags( channel ) & (1 << cls)))
+	int open_flags;
+	int fd;
+    
+    if (!(_dbg_get_channel_flags( channel ) & (1 << cls)))
 		return -1;
 
 	ret += snprintf(buf, sizeof(buf),"[%s:%s", debug_classes[cls], channel->name);
@@ -414,18 +457,15 @@ int dbg_log( enum _debug_class cls, struct _debug_channel *channel,
  	va_start(valist, format);
 	ret += vsnprintf(buf + ret, sizeof(buf) - ret, format, valist );
 	va_end(valist);
-
-	if ((fp = fopen(logfile, "a+")) == NULL) {
-		fprintf(stdout, "Emulator can't open.\n"
-				"Please check if "
-				"this binary file is running on the right path.\n");
-		exit(1);
-	}
-	fprintf(fp,"%s", buf);
-//	fputs(buf, fp);
-	fclose(fp);
-//	ret = fprintf(logfile, "%s\n", buf);
-//	fflush(stderr);
+   
+    open_flags = O_RDWR | O_APPEND | O_BINARY ;
+	fd = qemu_open(logpath, open_flags, 0666);
+	if(fd < 0) {
+        fprintf(stderr, "Can't open logfile: %s\n", logpath);
+    	exit(1);
+    }
+    qemu_write_full(fd, buf, ret);
+    close(fd);
 
 	return ret;
 }

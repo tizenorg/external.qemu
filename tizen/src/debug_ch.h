@@ -33,7 +33,7 @@
 
 #include <sys/types.h>
 
-//#define NO_DEBUG
+// #define NO_DEBUG
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,6 +56,9 @@ struct _debug_channel
 	char name[15];
 	char multiname[15];
 };
+
+void set_log_path(char *path);
+char *get_log_path(void);
 
 #ifndef NO_DEBUG
 #define MSGSIZE_MAX 2048
@@ -93,6 +96,9 @@ struct _debug_channel
 	 (dbg_log(__DBCL##dbcl,(dbch), "") == -1)) ? \
 (void)0 : (void)dbg_printf
 */
+
+extern char bin_dir[256];
+
 extern unsigned char _dbg_get_channel_flags( struct _debug_channel *channel );
 extern int _dbg_set_channel_flags( struct _debug_channel *channel,
 		unsigned char set, unsigned char clear );

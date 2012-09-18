@@ -43,7 +43,7 @@ int register_ioport_read(pio_addr_t start, int length, int size,
 int register_ioport_write(pio_addr_t start, int length, int size,
                           IOPortWriteFunc *func, void *opaque);
 void isa_unassign_ioport(pio_addr_t start, int length);
-
+bool isa_is_ioport_assigned(pio_addr_t start);
 
 void cpu_outb(pio_addr_t addr, uint8_t val);
 void cpu_outw(pio_addr_t addr, uint16_t val);
@@ -51,5 +51,26 @@ void cpu_outl(pio_addr_t addr, uint32_t val);
 uint8_t cpu_inb(pio_addr_t addr);
 uint16_t cpu_inw(pio_addr_t addr);
 uint32_t cpu_inl(pio_addr_t addr);
+
+struct MemoryRegion;
+struct MemoryRegionPortio;
+
+typedef struct PortioList {
+    const struct MemoryRegionPortio *ports;
+    struct MemoryRegion *address_space;
+    unsigned nr;
+    struct MemoryRegion **regions;
+    void *opaque;
+    const char *name;
+} PortioList;
+
+void portio_list_init(PortioList *piolist,
+                      const struct MemoryRegionPortio *callbacks,
+                      void *opaque, const char *name);
+void portio_list_destroy(PortioList *piolist);
+void portio_list_add(PortioList *piolist,
+                     struct MemoryRegion *address_space,
+                     uint32_t addr);
+void portio_list_del(PortioList *piolist);
 
 #endif /* IOPORT_H */

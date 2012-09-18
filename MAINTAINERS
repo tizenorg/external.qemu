@@ -56,12 +56,13 @@ M: Paul Brook <paul@codesourcery.com>
 Guest CPU cores (TCG):
 ----------------------
 Alpha
-M: qemu-devel@nongnu.org
-S: Orphan
+M: Richard Henderson <rth@twiddle.net>
+S: Maintained
 F: target-alpha/
 
 ARM
 M: Paul Brook <paul@codesourcery.com>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: target-arm/
 
@@ -69,6 +70,11 @@ CRIS
 M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
 S: Maintained
 F: target-cris/
+
+LM32
+M: Michael Walle <michael@walle.cc>
+S: Maintained
+F: target-lm32/
 
 M68K
 M: Paul Brook <paul@codesourcery.com>
@@ -110,6 +116,12 @@ M: qemu-devel@nongnu.org
 S: Odd Fixes
 F: target-i386/
 
+Xtensa
+M: Max Filippov <jcmvbkbc@gmail.com>
+W: http://wiki.osll.spb.ru/doku.php?id=etc:users:jcmvbkbc:qemu-target-xtensa
+S: Maintained
+F: target-xtensa/
+
 Guest CPU Cores (KVM):
 ----------------------
 
@@ -138,6 +150,16 @@ L: kvm@vger.kernel.org
 S: Supported
 F: target-i386/kvm.c
 
+Guest CPU Cores (Xen):
+----------------------
+
+X86
+M: Stefano Stabellini <stefano.stabellini@eu.citrix.com>
+L: xen-devel@lists.xensource.com
+S: Supported
+F: xen-*
+F: */xen*
+
 ARM Machines
 ------------
 Gumstix
@@ -147,6 +169,7 @@ F: hw/gumstix.c
 
 Integrator CP
 M: Paul Brook <paul@codesourcery.com>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: hw/integratorcp.c
 
@@ -172,6 +195,7 @@ F: hw/palm.c
 
 Real View
 M: Paul Brook <paul@codesourcery.com>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: hw/realview*
 
@@ -182,11 +206,13 @@ F: hw/spitz.c
 
 Stellaris
 M: Paul Brook <paul@codesourcery.com>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: hw/stellaris.c
 
 Versatile PB
 M: Paul Brook <paul@codesourcery.com>
+M: Peter Maydell <peter.maydell@linaro.org>
 S: Maintained
 F: hw/versatilepb.c
 
@@ -201,6 +227,18 @@ etraxfs
 M: Edgar E. Iglesias <edgar.iglesias@gmail.com>
 S: Maintained
 F: hw/etraxfs.c
+
+LM32 Machines
+-------------
+EVR32 and uclinux BSP
+M: Michael Walle <michael@walle.cc>
+S: Maintained
+F: hw/lm32_boards.c
+
+milkymist
+M: Michael Walle <michael@walle.cc>
+S: Maintained
+F: hw/milkymist.c
 
 M68K Machines
 -------------
@@ -265,9 +303,9 @@ M: Alexander Graf <agraf@suse.de>
 S: Maintained
 F: hw/ppc_oldworld.c
 
-Prep
-M: qemu-devel@nongnu.org
-S: Orphan
+PReP
+M: Andreas Färber <andreas.faerber@web.de>
+S: Odd Fixes
 F: hw/ppc_prep.c
 
 SH4 Machines
@@ -308,12 +346,29 @@ M: Anthony Liguori <aliguori@us.ibm.com>
 S: Supported
 F: hw/pc.[ch] hw/pc_piix.c
 
+Xtensa Machines
+---------------
+sim
+M: Max Filippov <jcmvbkbc@gmail.com>
+S: Maintained
+F: hw/xtensa_sim.c
+
+Avnet LX60
+M: Max Filippov <jcmvbkbc@gmail.com>
+S: Maintained
+F: hw/xtensa_lx60.c
+
 Devices
 -------
 IDE
 M: Kevin Wolf <kwolf@redhat.com>
 S: Odd Fixes
 F: hw/ide/
+
+OMAP
+M: Peter Maydell <peter.maydell@linaro.org>
+S: Maintained
+F: hw/omap*
 
 PCI
 M: Michael S. Tsirkin <mst@redhat.com>
@@ -396,6 +451,11 @@ M: Anthony Liguori <aliguori@us.ibm.com>
 S: Maintained
 F: ui/
 
+Cocoa graphics
+M: Andreas Färber <andreas.faerber@web.de>
+S: Odd Fixes
+F: ui/cocoa.m
+
 Main loop
 M: Anthony Liguori <aliguori@us.ibm.com>
 S: Supported
@@ -414,9 +474,21 @@ S: Maintained
 F: net/
 
 SLIRP
-M: qemu-devel@nongnu.org
-S: Orphan
+M: Jan Kiszka <jan.kiszka@siemens.com>
+S: Maintained
 F: slirp/
+T: git://git.kiszka.org/qemu.git queues/slirp
+
+Tracing
+M: Stefan Hajnoczi <stefanha@linux.vnet.ibm.com>
+S: Maintained
+F: trace/
+T: git://repo.or.cz/qemu/stefanha.git tracing
+
+Checkpatch
+M: Blue Swirl <blauwirbel@gmail.com>
+S: Odd Fixes
+F: scripts/checkpatch.pl
 
 Usermode Emulation
 ------------------
@@ -463,7 +535,7 @@ S: Maintained
 F: tcg/ia64/
 
 MIPS target
-M: Aurelien Jarno <aurelien@aurel32.ne>
+M: Aurelien Jarno <aurelien@aurel32.net>
 S: Maintained
 F: tcg/mips/
 
@@ -487,3 +559,8 @@ SPARC target
 M: Blue Swirl <blauwirbel@gmail.com>
 S: Maintained
 F: tcg/sparc/
+
+TCI target
+M: Stefan Weil <sw@weilnetz.de>
+S: Maintained
+F: tcg/tci

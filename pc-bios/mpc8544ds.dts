@@ -25,18 +25,6 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
-
-		PowerPC,8544@0 {
-			device_type = "cpu";
-			reg = <0x0>;
-			d-cache-line-size = <32>;	// 32 bytes
-			i-cache-line-size = <32>;	// 32 bytes
-			d-cache-size = <0x8000>;		// L1, 32K
-			i-cache-size = <0x8000>;		// L1, 32K
-			timebase-frequency = <0>;
-			bus-frequency = <0>;
-			clock-frequency = <0>;
-		};
 	};
 
 	memory {
@@ -82,6 +70,12 @@
 			compatible = "chrp,open-pic";
 			device_type = "open-pic";
 		};
+
+                global-utilities@e0000 {        //global utilities block
+                        compatible = "fsl,mpc8544-guts";
+                        reg = <0xe0000 0x1000>;
+                        fsl,has-rstcr;
+                };
 	};
 
 	pci0: pci@e0008000 {
@@ -118,5 +112,8 @@
 
 	chosen {
 		linux,stdout-path = "/soc8544@e0000000/serial@4500";
+	};
+
+	hypervisor {
 	};
 };

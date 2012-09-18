@@ -50,28 +50,16 @@ static int dec_map_irq(PCIDevice *pci_dev, int irq_num)
     return irq_num;
 }
 
-static int dec_21154_initfn(PCIDevice *dev)
-{
-    int rc;
-
-    rc = pci_bridge_initfn(dev);
-    if (rc < 0) {
-        return rc;
-    }
-
-    pci_config_set_vendor_id(dev->config, PCI_VENDOR_ID_DEC);
-    pci_config_set_device_id(dev->config, PCI_DEVICE_ID_DEC_21154);
-    return 0;
-}
-
 static PCIDeviceInfo dec_21154_pci_bridge_info = {
     .qdev.name = "dec-21154-p2p-bridge",
     .qdev.desc = "DEC 21154 PCI-PCI bridge",
     .qdev.size = sizeof(PCIBridge),
     .qdev.vmsd = &vmstate_pci_device,
     .qdev.reset = pci_bridge_reset,
-    .init = dec_21154_initfn,
+    .init = pci_bridge_initfn,
     .exit = pci_bridge_exitfn,
+    .vendor_id = PCI_VENDOR_ID_DEC,
+    .device_id = PCI_DEVICE_ID_DEC_21154,
     .config_write = pci_bridge_write_config,
     .is_bridge = 1,
 };
@@ -92,26 +80,21 @@ PCIBus *pci_dec_21154_init(PCIBus *parent_bus, int devfn)
 static int pci_dec_21154_init_device(SysBusDevice *dev)
 {
     DECState *s;
-    int pci_mem_config, pci_mem_data;
 
     s = FROM_SYSBUS(DECState, dev);
 
-    pci_mem_config = pci_host_conf_register_mmio(&s->host_state,
-                                                 DEVICE_LITTLE_ENDIAN);
-    pci_mem_data = pci_host_data_register_mmio(&s->host_state,
-                                               DEVICE_LITTLE_ENDIAN);
-    sysbus_init_mmio(dev, 0x1000, pci_mem_config);
-    sysbus_init_mmio(dev, 0x1000, pci_mem_data);
+    memory_region_init_io(&s->host_state.conf_mem, &pci_host_conf_le_ops,
+                          &s->host_state, "pci-conf-idx", 0x1000);
+    memory_region_init_io(&s->host_state.data_mem, &pci_host_data_le_ops,
+                          &s->host_state, "pci-data-idx", 0x1000);
+    sysbus_init_mmio_region(dev, &s->host_state.conf_mem);
+    sysbus_init_mmio_region(dev, &s->host_state.data_mem);
     return 0;
 }
 
 static int dec_21154_pci_host_init(PCIDevice *d)
 {
     /* PCI2PCI bridge same values as PearPC - check this */
-    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_DEC);
-    pci_config_set_device_id(d->config, PCI_DEVICE_ID_DEC_21154);
-    pci_set_byte(d->config + PCI_REVISION_ID, 0x02);
-    pci_config_set_class(d->config, PCI_CLASS_BRIDGE_PCI);
     return 0;
 }
 
@@ -119,6 +102,10 @@ static PCIDeviceInfo dec_21154_pci_host_info = {
     .qdev.name = "dec-21154",
     .qdev.size = sizeof(PCIDevice),
     .init      = dec_21154_pci_host_init,
+    .vendor_id = PCI_VENDOR_ID_DEC,
+    .device_id = PCI_DEVICE_ID_DEC_21154,
+    .revision = 0x02,
+    .class_id = PCI_CLASS_BRIDGE_PCI,
     .is_bridge  = 1,
 };
 

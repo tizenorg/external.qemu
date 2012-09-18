@@ -85,9 +85,6 @@ DEF_HELPER_0(rdpmc, void)
 DEF_HELPER_0(rdmsr, void)
 DEF_HELPER_0(wrmsr, void)
 
-/* opengl support by okdear */
-DEF_HELPER_0(opengl99, void)
-
 DEF_HELPER_1(check_iob, void, i32)
 DEF_HELPER_1(check_iow, void, i32)
 DEF_HELPER_1(check_iol, void, i32)
@@ -200,6 +197,7 @@ DEF_HELPER_2(lzcnt, tl, tl, int)
 
 /* MMX/SSE */
 
+DEF_HELPER_1(ldmxcsr, void, i32)
 DEF_HELPER_0(enter_mmx, void)
 DEF_HELPER_0(emms, void)
 DEF_HELPER_2(movq, void, ptr, ptr)

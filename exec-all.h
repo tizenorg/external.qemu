@@ -40,10 +40,11 @@ typedef ram_addr_t tb_page_addr_t;
 #define DISAS_UPDATE  2 /* cpu state was modified dynamically */
 #define DISAS_TB_JUMP 3 /* only pc was modified statically */
 
+struct TranslationBlock;
 typedef struct TranslationBlock TranslationBlock;
 
 /* XXX: make safe guess about sizes */
-#define MAX_OP_PER_INSTR 96
+#define MAX_OP_PER_INSTR 208
 
 #if HOST_LONG_BITS == 32
 #define MAX_OPC_PARAM_PER_ARG 2
@@ -77,26 +78,24 @@ extern uint16_t gen_opc_icount[OPC_BUF_SIZE];
 
 void gen_intermediate_code(CPUState *env, struct TranslationBlock *tb);
 void gen_intermediate_code_pc(CPUState *env, struct TranslationBlock *tb);
-void gen_pc_load(CPUState *env, struct TranslationBlock *tb,
-                 unsigned long searched_pc, int pc_pos, void *puc);
+void restore_state_to_opc(CPUState *env, struct TranslationBlock *tb,
+                          int pc_pos);
 
 void cpu_gen_init(void);
 int cpu_gen_code(CPUState *env, struct TranslationBlock *tb,
                  int *gen_code_size_ptr);
 int cpu_restore_state(struct TranslationBlock *tb,
-                      CPUState *env, unsigned long searched_pc,
-                      void *puc);
+                      CPUState *env, unsigned long searched_pc);
 void cpu_resume_from_signal(CPUState *env1, void *puc);
 void cpu_io_recompile(CPUState *env, void *retaddr);
 TranslationBlock *tb_gen_code(CPUState *env,
                               target_ulong pc, target_ulong cs_base, int flags,
                               int cflags);
 void cpu_exec_init(CPUState *env);
-void QEMU_NORETURN cpu_loop_exit(void);
+void QEMU_NORETURN cpu_loop_exit(CPUState *env1);
 int page_unprotect(target_ulong address, unsigned long pc, void *puc);
 void tb_invalidate_phys_page_range(tb_page_addr_t start, tb_page_addr_t end,
                                    int is_cpu_write_access);
-void tb_invalidate_page_range(target_ulong start, target_ulong end);
 void tlb_flush_page(CPUState *env, target_ulong addr);
 void tlb_flush(CPUState *env, int flush_global);
 #if !defined(CONFIG_USER_ONLY)
@@ -122,6 +121,8 @@ void tlb_set_page(CPUState *env, target_ulong vaddr,
 #endif
 
 #if defined(_ARCH_PPC) || defined(__x86_64__) || defined(__arm__) || defined(__i386__)
+#define USE_DIRECT_JUMP
+#elif defined(CONFIG_TCG_INTERPRETER)
 #define USE_DIRECT_JUMP
 #endif
 
@@ -158,9 +159,6 @@ struct TranslationBlock {
     struct TranslationBlock *jmp_next[2];
     struct TranslationBlock *jmp_first;
     uint32_t icount;
-#ifdef CONFIG_EXEC_PROFILE
-    uint32_t tbexec_count[2];
-#endif
 };
 
 static inline unsigned int tb_jmp_cache_hash_page(target_ulong pc)
@@ -183,7 +181,6 @@ static inline unsigned int tb_phys_hash_func(tb_page_addr_t pc)
     return (pc >> 2) & (CODE_GEN_PHYS_HASH_SIZE - 1);
 }
 
-TranslationBlock *tb_alloc(target_ulong pc);
 void tb_free(TranslationBlock *tb);
 void tb_flush(CPUState *env);
 void tb_link_page(TranslationBlock *tb,
@@ -194,7 +191,14 @@ extern TranslationBlock *tb_phys_hash[CODE_GEN_PHYS_HASH_SIZE];
 
 #if defined(USE_DIRECT_JUMP)
 
-#if defined(_ARCH_PPC)
+#if defined(CONFIG_TCG_INTERPRETER)
+static inline void tb_set_jmp_target1(uintptr_t jmp_addr, uintptr_t addr)
+{
+    /* patch the branch destination */
+    *(uint32_t *)jmp_addr = addr - (jmp_addr + 4);
+    /* no need to flush icache explicitly */
+}
+#elif defined(_ARCH_PPC)
 void ppc_tb_set_jmp_target(unsigned long jmp_addr, unsigned long addr);
 #define tb_set_jmp_target1 ppc_tb_set_jmp_target
 #elif defined(__i386__) || defined(__x86_64__)
@@ -228,6 +232,8 @@ static inline void tb_set_jmp_target1(unsigned long jmp_addr, unsigned long addr
     __asm __volatile__ ("swi 0x9f0002" : : "r" (_beg), "r" (_end), "r" (_flg));
 #endif
 }
+#else
+#error tb_set_jmp_target1 is missing
 #endif
 
 static inline void tb_set_jmp_target(TranslationBlock *tb,
@@ -272,13 +278,32 @@ extern spinlock_t tb_lock;
 
 extern int tb_invalidated_flag;
 
+/* The return address may point to the start of the next instruction.
+   Subtracting one gets us the call instruction itself.  */
+#if defined(CONFIG_TCG_INTERPRETER)
+/* Alpha and SH4 user mode emulations and Softmmu call GETPC().
+   For all others, GETPC remains undefined (which makes TCI a little faster. */
+# if defined(CONFIG_SOFTMMU) || defined(TARGET_ALPHA) || defined(TARGET_SH4)
+extern void *tci_tb_ptr;
+#  define GETPC() tci_tb_ptr
+# endif
+#elif defined(__s390__) && !defined(__s390x__)
+# define GETPC() ((void*)(((unsigned long)__builtin_return_address(0) & 0x7fffffffUL) - 1))
+#elif defined(__arm__)
+/* Thumb return addresses have the low bit set, so we need to subtract two.
+   This is still safe in ARM mode because instructions are 4 bytes.  */
+# define GETPC() ((void *)((unsigned long)__builtin_return_address(0) - 2))
+#else
+# define GETPC() ((void *)((unsigned long)__builtin_return_address(0) - 1))
+#endif
+
 #if !defined(CONFIG_USER_ONLY)
 
 extern CPUWriteMemoryFunc *io_mem_write[IO_MEM_NB_ENTRIES][4];
 extern CPUReadMemoryFunc *io_mem_read[IO_MEM_NB_ENTRIES][4];
 extern void *io_mem_opaque[IO_MEM_NB_ENTRIES];
 
-void tlb_fill(target_ulong addr, int is_write, int mmu_idx,
+void tlb_fill(CPUState *env1, target_ulong addr, int is_write, int mmu_idx,
               void *retaddr);
 
 #include "softmmu_defs.h"
@@ -327,19 +352,20 @@ static inline tb_page_addr_t get_page_addr_code(CPUState *env1, target_ulong add
     }
     pd = env1->tlb_table[mmu_idx][page_index].addr_code & ~TARGET_PAGE_MASK;
     if (pd > IO_MEM_ROM && !(pd & IO_MEM_ROMD)) {
-#if defined(TARGET_SPARC) || defined(TARGET_MIPS)
-        do_unassigned_access(addr, 0, 1, 0, 4);
+#if defined(TARGET_ALPHA) || defined(TARGET_MIPS) || defined(TARGET_SPARC)
+        cpu_unassigned_access(env1, addr, 0, 1, 0, 4);
 #else
         cpu_abort(env1, "Trying to execute code outside RAM or ROM at 0x" TARGET_FMT_lx "\n", addr);
 #endif
     }
-    p = (void *)(unsigned long)addr
-        + env1->tlb_table[mmu_idx][page_index].addend;
+    p = (void *)((uintptr_t)addr + env1->tlb_table[mmu_idx][page_index].addend);
     return qemu_ram_addr_from_host_nofail(p);
 }
 
-#if defined(CONFIG_TCG_TARGET_X86_OPT)
-/* extended versions of MMU helpers for x86 TCG target optimization */
+#if defined(CONFIG_QEMU_LDST_OPTIMIZATION) && defined(CONFIG_SOFTMMU)
+/* Extended versions of MMU helpers for qemu_ld/st optimization.
+   They get return address arguments because the caller PCs are not where helpers return to. */
+#if defined(__i386__) || defined(__x86_64__)
 uint8_t REGPARM __ldextb_mmu(target_ulong addr, int mmu_idx, void *ra);
 void REGPARM __stextb_mmu(target_ulong addr, uint8_t val, int mmu_idx, void *ra);
 uint16_t REGPARM __ldextw_mmu(target_ulong addr, int mmu_idx, void *ra);
@@ -348,7 +374,9 @@ uint32_t REGPARM __ldextl_mmu(target_ulong addr, int mmu_idx, void *ra);
 void REGPARM __stextl_mmu(target_ulong addr, uint32_t val, int mmu_idx, void *ra);
 uint64_t REGPARM __ldextq_mmu(target_ulong addr, int mmu_idx, void *ra);
 void REGPARM __stextq_mmu(target_ulong addr, uint64_t val, int mmu_idx, void *ra);
-#endif  /* CONFIG_TCG_TARGET_X86_OPT */
+#endif
+#endif  /* CONFIG_QEMU_LDST_OPTIMIZATION */
+
 #endif
 
 typedef void (CPUDebugExcpHandler)(CPUState *env);
@@ -360,5 +388,19 @@ extern int singlestep;
 
 /* cpu-exec.c */
 extern volatile sig_atomic_t exit_request;
+
+/* Deterministic execution requires that IO only be performed on the last
+   instruction of a TB so that interrupts take effect immediately.  */
+static inline int can_do_io(CPUState *env)
+{
+    if (!use_icount) {
+        return 1;
+    }
+    /* If not executing code then assume we are ok.  */
+    if (!env->current_tb) {
+        return 1;
+    }
+    return env->can_do_io != 0;
+}
 
 #endif

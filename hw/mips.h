@@ -8,18 +8,6 @@ PCIBus *gt64120_register(qemu_irq *pic);
 /* bonito.c */
 PCIBus *bonito_init(qemu_irq *pic);
 
-/* ds1225y.c */
-void *ds1225y_init(target_phys_addr_t mem_base, const char *filename);
-void ds1225y_set_protection(void *opaque, int protection);
-
-/* g364fb.c */
-int g364fb_mm_init(target_phys_addr_t vram_base,
-                   target_phys_addr_t ctrl_base, int it_shift,
-                   qemu_irq irq);
-
-/* mipsnet.c */
-void mipsnet_init(int base, qemu_irq irq, NICInfo *nd);
-
 /* jazz_led.c */
 void jazz_led_init(target_phys_addr_t base);
 

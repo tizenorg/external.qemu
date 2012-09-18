@@ -26,15 +26,66 @@
  * THE SOFTWARE.
  */
 
+/* The following block of code temporarily renames the daemon() function so the
+   compiler does not see the warning associated with it in stdlib.h on OSX */
+#ifdef __APPLE__
+#define daemon qemu_fake_daemon_function
+#include <stdlib.h>
+#undef daemon
+extern int daemon(int, int);
+#endif
+
+#if defined(__linux__) && defined(__x86_64__)
+   /* Use 2 MiB alignment so transparent hugepages can be used by KVM.
+      Valgrind does not support alignments larger than 1 MiB,
+      therefore we need special code which handles running on Valgrind. */
+#  define QEMU_VMALLOC_ALIGN (512 * 4096)
+#  define CONFIG_VALGRIND
+#else
+#  define QEMU_VMALLOC_ALIGN getpagesize()
+#endif
+
 #include "config-host.h"
 #include "sysemu.h"
 #include "trace.h"
 #include "qemu_socket.h"
 
+
+#ifdef CONFIG_MARU
+#include "../tizen/src/skin/maruskin_client.h"
+#endif
+
+#if defined(CONFIG_VALGRIND)
+static int running_on_valgrind = -1;
+#else
+#  define running_on_valgrind 0
+#endif
+
+int qemu_daemon(int nochdir, int noclose)
+{
+    return daemon(nochdir, noclose);
+}
+
 void *qemu_oom_check(void *ptr)
 {
     if (ptr == NULL) {
         fprintf(stderr, "Failed to allocate memory: %s\n", strerror(errno));
+
+#ifdef CONFIG_MARU
+        char _msg[] = "Failed to allocate memory in qemu.";
+        char cmd[JAVA_MAX_COMMAND_LENGTH] = { 0, };
+
+        int len = strlen(JAVA_EXEFILE_PATH) + strlen(JAVA_EXEOPTION) + strlen(JAR_SKINFILE_PATH) +
+            strlen(JAVA_SIMPLEMODE_OPTION) + strlen(_msg) + 7;
+        if (len > JAVA_MAX_COMMAND_LENGTH) {
+            len = JAVA_MAX_COMMAND_LENGTH;
+        }
+
+        snprintf(cmd, len, "%s %s %s %s=\"%s\"",
+            JAVA_EXEFILE_PATH, JAVA_EXEOPTION, JAR_SKINFILE_PATH, JAVA_SIMPLEMODE_OPTION, _msg);
+        int ret = system(cmd);
+#endif
+
         abort();
     }
     return ptr;
@@ -63,13 +114,37 @@ void *qemu_memalign(size_t alignment, size_t size)
 /* alloc shared memory pages */
 void *qemu_vmalloc(size_t size)
 {
-    return qemu_memalign(getpagesize(), size);
+    void *ptr;
+    size_t align = QEMU_VMALLOC_ALIGN;
+
+#if defined(CONFIG_VALGRIND)
+    if (running_on_valgrind < 0) {
+        /* First call, test whether we are running on Valgrind.
+           This is a substitute for RUNNING_ON_VALGRIND from valgrind.h. */
+        const char *ld = getenv("LD_PRELOAD");
+        running_on_valgrind = (ld != NULL && strstr(ld, "vgpreload"));
+    }
+#endif
+
+    if (size < align || running_on_valgrind) {
+        align = getpagesize();
+    }
+    ptr = qemu_memalign(align, size);
+    trace_qemu_vmalloc(size, ptr);
+    return ptr;
 }
 
 void qemu_vfree(void *ptr)
 {
     trace_qemu_vfree(ptr);
     free(ptr);
+}
+
+void socket_set_block(int fd)
+{
+    int f;
+    f = fcntl(fd, F_GETFL);
+    fcntl(fd, F_SETFL, f & ~O_NONBLOCK);
 }
 
 void socket_set_nonblock(int fd)
@@ -108,8 +183,7 @@ int qemu_pipe(int pipefd[2])
     return ret;
 }
 
-int qemu_utimensat(int dirfd, const char *path, const struct timespec *times,
-                   int flags)
+int qemu_utimens(const char *path, const struct timespec *times)
 {
     struct timeval tv[2], tv_now;
     struct stat st;
@@ -117,7 +191,7 @@ int qemu_utimensat(int dirfd, const char *path, const struct timespec *times,
 #ifdef CONFIG_UTIMENSAT
     int ret;
 
-    ret = utimensat(dirfd, path, times, flags);
+    ret = utimensat(AT_FDCWD, path, times, AT_SYMLINK_NOFOLLOW);
     if (ret != -1 || errno != ENOSYS) {
         return ret;
     }

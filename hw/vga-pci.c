@@ -29,11 +29,21 @@
 #include "pixel_ops.h"
 #include "qemu-timer.h"
 #include "loader.h"
+#ifdef CONFIG_MARU
+#include "../tizen/src/hw/maru_device_ids.h"
+#include "../tizen/src/hw/maru_vga_int.h"
+#endif
 
 typedef struct PCIVGAState {
     PCIDevice dev;
     VGACommonState vga;
 } PCIVGAState;
+
+int pci_vga_init(PCIBus *bus)
+{
+    pci_create_simple(bus, -1, "VGA");
+    return 0;
+}
 
 static const VMStateDescription vmstate_vga_pci = {
     .name = "vga",
@@ -47,63 +57,27 @@ static const VMStateDescription vmstate_vga_pci = {
     }
 };
 
-static void vga_map(PCIDevice *pci_dev, int region_num,
-                    pcibus_t addr, pcibus_t size, int type)
-{
-    PCIVGAState *d = (PCIVGAState *)pci_dev;
-    VGACommonState *s = &d->vga;
-
-    cpu_register_physical_memory(addr, s->vram_size, s->vram_offset);
-    s->map_addr = addr;
-    s->map_end = addr + s->vram_size;
-    vga_dirty_log_start(s);
-}
-
-static void pci_vga_write_config(PCIDevice *d,
-                                 uint32_t address, uint32_t val, int len)
-{
-    PCIVGAState *pvs = container_of(d, PCIVGAState, dev);
-    VGACommonState *s = &pvs->vga;
-
-    pci_default_write_config(d, address, val, len);
-    if (s->map_addr && pvs->dev.io_regions[0].addr == -1)
-        s->map_addr = 0;
-}
-
 static int pci_vga_initfn(PCIDevice *dev)
 {
      PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
      VGACommonState *s = &d->vga;
-     uint8_t *pci_conf = d->dev.config;
 
      // vga + console init
      vga_common_init(s, VGA_RAM_SIZE);
-     vga_init(s);
+     vga_init(s, pci_address_space(dev), pci_address_space_io(dev), true);
 
      s->ds = graphic_console_init(s->update, s->invalidate,
                                   s->screen_dump, s->text_update, s);
 
-     // dummy VGA (same as Bochs ID)
-     pci_config_set_vendor_id(pci_conf, PCI_VENDOR_ID_QEMU);
-     pci_config_set_device_id(pci_conf, PCI_DEVICE_ID_QEMU_VGA);
-     pci_config_set_class(pci_conf, PCI_CLASS_DISPLAY_VGA);
-
      /* XXX: VGA_RAM_SIZE must be a power of two */
-     pci_register_bar(&d->dev, 0, VGA_RAM_SIZE,
-                      PCI_BASE_ADDRESS_MEM_PREFETCH, vga_map);
+     pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram);
 
      if (!dev->rom_bar) {
          /* compatibility with pc-0.13 and older */
-         vga_init_vbe(s);
+         vga_init_vbe(s, pci_address_space(dev));
      }
 
      return 0;
-}
-
-int pci_vga_init(PCIBus *bus)
-{
-    pci_create_simple(bus, -1, "VGA");
-    return 0;
 }
 
 static PCIDeviceInfo vga_info = {
@@ -112,30 +86,66 @@ static PCIDeviceInfo vga_info = {
     .qdev.vmsd    = &vmstate_vga_pci,
     .no_hotplug   = 1,
     .init         = pci_vga_initfn,
-    .config_write = pci_vga_write_config,
     .romfile      = "vgabios-stdvga.bin",
+
+    /* dummy VGA (same as Bochs ID) */
+    .vendor_id    = PCI_VENDOR_ID_QEMU,
+    .device_id    = PCI_DEVICE_ID_QEMU_VGA,
+    .class_id     = PCI_CLASS_DISPLAY_VGA,
 };
 
-int pci_tizen_vga_init(PCIBus *bus)
+#ifdef CONFIG_MARU
+
+int pci_maru_vga_init(PCIBus *bus)
 {
-    pci_create_simple(bus, -1, "TIZEN_VGA");
+    pci_create_simple(bus, -1, "MARU_VGA");
     return 0;
 }
 
-static PCIDeviceInfo tizen_vga_info = {
-    .qdev.name    = "TIZEN_VGA",
+static int maru_pci_vga_initfn(PCIDevice *dev)
+{
+     PCIVGAState *d = DO_UPCAST(PCIVGAState, dev, dev);
+     VGACommonState *s = &d->vga;
+
+     // vga + console init
+     maru_vga_common_init(s, VGA_RAM_SIZE);
+     vga_init(s, pci_address_space(dev), pci_address_space_io(dev), true);
+
+     s->ds = graphic_console_init(s->update, s->invalidate,
+                                  s->screen_dump, s->text_update, s);
+
+     /* XXX: VGA_RAM_SIZE must be a power of two */
+     pci_register_bar(&d->dev, 0, PCI_BASE_ADDRESS_MEM_PREFETCH, &s->vram);
+
+     if (!dev->rom_bar) {
+         /* compatibility with pc-0.13 and older */
+         vga_init_vbe(s, pci_address_space(dev));
+     }
+
+     return 0;
+}
+
+static PCIDeviceInfo maru_vga_info = {
+    .qdev.name    = "MARU_VGA",
     .qdev.size    = sizeof(PCIVGAState),
     .qdev.vmsd    = &vmstate_vga_pci,
     .no_hotplug   = 1,
-    .init         = pci_vga_initfn,
-    .config_write = pci_vga_write_config,
-    .romfile      = "vgabios-tizenvga.bin",
+    .init         = maru_pci_vga_initfn,
+    .romfile      = "vgabios-maruvga.bin",
+
+    /* dummy VGA (same as Bochs ID) */
+    .vendor_id    = PCI_VENDOR_ID_QEMU,
+    .device_id    = PCI_DEVICE_ID_QEMU_VGA,
+    .class_id     = PCI_CLASS_DISPLAY_VGA,
 };
+
+#endif // CONFIG_MARU
 
 static void vga_register(void)
 {
     pci_qdev_register(&vga_info);
-// by caramis...
-    pci_qdev_register(&tizen_vga_info);
+#ifdef CONFIG_MARU
+    pci_qdev_register(&maru_vga_info);
+#endif
 }
 device_init(vga_register);

@@ -4,7 +4,7 @@
  * Copyright (c) 2005-2006 CodeSourcery.
  * Written by Paul Brook
  *
- * This code is licenced under the GPL.
+ * This code is licensed under the GPL.
  */
 
 #include "sysbus.h"
@@ -140,41 +140,32 @@ static void arm_timer_tick(void *opaque)
     arm_timer_update(s);
 }
 
-static void arm_timer_save(QEMUFile *f, void *opaque)
-{
-    arm_timer_state *s = (arm_timer_state *)opaque;
-    qemu_put_be32(f, s->control);
-    qemu_put_be32(f, s->limit);
-    qemu_put_be32(f, s->int_level);
-    qemu_put_ptimer(f, s->timer);
-}
-
-static int arm_timer_load(QEMUFile *f, void *opaque, int version_id)
-{
-    arm_timer_state *s = (arm_timer_state *)opaque;
-
-    if (version_id != 1)
-        return -EINVAL;
-
-    s->control = qemu_get_be32(f);
-    s->limit = qemu_get_be32(f);
-    s->int_level = qemu_get_be32(f);
-    qemu_get_ptimer(f, s->timer);
-    return 0;
-}
+static const VMStateDescription vmstate_arm_timer = {
+    .name = "arm_timer",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField[]) {
+        VMSTATE_UINT32(control, arm_timer_state),
+        VMSTATE_UINT32(limit, arm_timer_state),
+        VMSTATE_INT32(int_level, arm_timer_state),
+        VMSTATE_PTIMER(timer, arm_timer_state),
+        VMSTATE_END_OF_LIST()
+    }
+};
 
 static arm_timer_state *arm_timer_init(uint32_t freq)
 {
     arm_timer_state *s;
     QEMUBH *bh;
 
-    s = (arm_timer_state *)qemu_mallocz(sizeof(arm_timer_state));
+    s = (arm_timer_state *)g_malloc0(sizeof(arm_timer_state));
     s->freq = freq;
     s->control = TIMER_CTRL_IE;
 
     bh = qemu_bh_new(arm_timer_tick, s);
     s->timer = ptimer_init(bh);
-    register_savevm(NULL, "arm_timer", -1, 1, arm_timer_save, arm_timer_load, s);
+    vmstate_register(NULL, -1, &vmstate_arm_timer, s);
     return s;
 }
 
@@ -185,6 +176,7 @@ static arm_timer_state *arm_timer_init(uint32_t freq)
 
 typedef struct {
     SysBusDevice busdev;
+    MemoryRegion iomem;
     arm_timer_state *timer[2];
     int level[2];
     qemu_irq irq;
@@ -199,7 +191,8 @@ static void sp804_set_irq(void *opaque, int irq, int level)
     qemu_set_irq(s->irq, s->level[0] || s->level[1]);
 }
 
-static uint32_t sp804_read(void *opaque, target_phys_addr_t offset)
+static uint64_t sp804_read(void *opaque, target_phys_addr_t offset,
+                           unsigned size)
 {
     sp804_state *s = (sp804_state *)opaque;
 
@@ -212,7 +205,7 @@ static uint32_t sp804_read(void *opaque, target_phys_addr_t offset)
 }
 
 static void sp804_write(void *opaque, target_phys_addr_t offset,
-                        uint32_t value)
+                        uint64_t value, unsigned size)
 {
     sp804_state *s = (sp804_state *)opaque;
 
@@ -223,40 +216,25 @@ static void sp804_write(void *opaque, target_phys_addr_t offset,
     }
 }
 
-static CPUReadMemoryFunc * const sp804_readfn[] = {
-   sp804_read,
-   sp804_read,
-   sp804_read
+static const MemoryRegionOps sp804_ops = {
+    .read = sp804_read,
+    .write = sp804_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
-static CPUWriteMemoryFunc * const sp804_writefn[] = {
-   sp804_write,
-   sp804_write,
-   sp804_write
+static const VMStateDescription vmstate_sp804 = {
+    .name = "sp804",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField[]) {
+        VMSTATE_INT32_ARRAY(level, sp804_state, 2),
+        VMSTATE_END_OF_LIST()
+    }
 };
-
-static void sp804_save(QEMUFile *f, void *opaque)
-{
-    sp804_state *s = (sp804_state *)opaque;
-    qemu_put_be32(f, s->level[0]);
-    qemu_put_be32(f, s->level[1]);
-}
-
-static int sp804_load(QEMUFile *f, void *opaque, int version_id)
-{
-    sp804_state *s = (sp804_state *)opaque;
-
-    if (version_id != 1)
-        return -EINVAL;
-
-    s->level[0] = qemu_get_be32(f);
-    s->level[1] = qemu_get_be32(f);
-    return 0;
-}
 
 static int sp804_init(SysBusDevice *dev)
 {
-    int iomemtype;
     sp804_state *s = FROM_SYSBUS(sp804_state, dev);
     qemu_irq *qi;
 
@@ -268,10 +246,9 @@ static int sp804_init(SysBusDevice *dev)
     s->timer[1] = arm_timer_init(1000000);
     s->timer[0]->irq = qi[0];
     s->timer[1]->irq = qi[1];
-    iomemtype = cpu_register_io_memory(sp804_readfn,
-                                       sp804_writefn, s, DEVICE_NATIVE_ENDIAN);
-    sysbus_init_mmio(dev, 0x1000, iomemtype);
-    register_savevm(&dev->qdev, "sp804", -1, 1, sp804_save, sp804_load, s);
+    memory_region_init_io(&s->iomem, &sp804_ops, s, "sp804", 0x1000);
+    sysbus_init_mmio_region(dev, &s->iomem);
+    vmstate_register(&dev->qdev, -1, &vmstate_sp804, s);
     return 0;
 }
 
@@ -280,17 +257,19 @@ static int sp804_init(SysBusDevice *dev)
 
 typedef struct {
     SysBusDevice busdev;
+    MemoryRegion iomem;
     arm_timer_state *timer[3];
 } icp_pit_state;
 
-static uint32_t icp_pit_read(void *opaque, target_phys_addr_t offset)
+static uint64_t icp_pit_read(void *opaque, target_phys_addr_t offset,
+                             unsigned size)
 {
     icp_pit_state *s = (icp_pit_state *)opaque;
     int n;
 
     /* ??? Don't know the PrimeCell ID for this device.  */
     n = offset >> 8;
-    if (n > 3) {
+    if (n > 2) {
         hw_error("sp804_read: Bad timer %d\n", n);
     }
 
@@ -298,35 +277,27 @@ static uint32_t icp_pit_read(void *opaque, target_phys_addr_t offset)
 }
 
 static void icp_pit_write(void *opaque, target_phys_addr_t offset,
-                          uint32_t value)
+                          uint64_t value, unsigned size)
 {
     icp_pit_state *s = (icp_pit_state *)opaque;
     int n;
 
     n = offset >> 8;
-    if (n > 3) {
+    if (n > 2) {
         hw_error("sp804_write: Bad timer %d\n", n);
     }
 
     arm_timer_write(s->timer[n], offset & 0xff, value);
 }
 
-
-static CPUReadMemoryFunc * const icp_pit_readfn[] = {
-   icp_pit_read,
-   icp_pit_read,
-   icp_pit_read
-};
-
-static CPUWriteMemoryFunc * const icp_pit_writefn[] = {
-   icp_pit_write,
-   icp_pit_write,
-   icp_pit_write
+static const MemoryRegionOps icp_pit_ops = {
+    .read = icp_pit_read,
+    .write = icp_pit_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static int icp_pit_init(SysBusDevice *dev)
 {
-    int iomemtype;
     icp_pit_state *s = FROM_SYSBUS(icp_pit_state, dev);
 
     /* Timer 0 runs at the system clock speed (40MHz).  */
@@ -339,10 +310,8 @@ static int icp_pit_init(SysBusDevice *dev)
     sysbus_init_irq(dev, &s->timer[1]->irq);
     sysbus_init_irq(dev, &s->timer[2]->irq);
 
-    iomemtype = cpu_register_io_memory(icp_pit_readfn,
-                                       icp_pit_writefn, s,
-                                       DEVICE_NATIVE_ENDIAN);
-    sysbus_init_mmio(dev, 0x1000, iomemtype);
+    memory_region_init_io(&s->iomem, &icp_pit_ops, s, "icp_pit", 0x1000);
+    sysbus_init_mmio_region(dev, &s->iomem);
     /* This device has no state to save/restore.  The component timers will
        save themselves.  */
     return 0;

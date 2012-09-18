@@ -21,13 +21,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <inttypes.h>
-#include <signal.h>
 
 #include "cpu.h"
-#include "exec-all.h"
 #include "qemu-common.h"
 #include "kvm.h"
-#include "kvm_x86.h"
+#ifndef CONFIG_USER_ONLY
+#include "sysemu.h"
+#include "monitor.h"
+#endif
 
 //#define DEBUG_MMU
 
@@ -96,18 +97,19 @@ void cpu_reset(CPUX86State *env)
 
     env->mxcsr = 0x1f80;
 
+    env->pat = 0x0007040600070406ULL;
+    env->msr_ia32_misc_enable = MSR_IA32_MISC_ENABLE_DEFAULT;
+
     memset(env->dr, 0, sizeof(env->dr));
     env->dr[6] = DR6_FIXED_1;
     env->dr[7] = DR7_FIXED_1;
     cpu_breakpoint_remove_all(env, BP_CPU);
     cpu_watchpoint_remove_all(env, BP_CPU);
-
-    env->mcg_status = 0;
 }
 
 void cpu_x86_close(CPUX86State *env)
 {
-    qemu_free(env);
+    g_free(env);
 }
 
 static void cpu_x86_version(CPUState *env, int *family, int *model)
@@ -400,21 +402,10 @@ void cpu_dump_state(CPUState *env, FILE *f, fprintf_function cpu_fprintf,
                     fptag,
                     env->mxcsr);
         for(i=0;i<8;i++) {
-#if defined(USE_X86LDOUBLE)
-            union {
-                long double d;
-                struct {
-                    uint64_t lower;
-                    uint16_t upper;
-                } l;
-            } tmp;
-            tmp.d = env->fpregs[i].d;
+            CPU_LDoubleU u;
+            u.d = env->fpregs[i].d;
             cpu_fprintf(f, "FPR%d=%016" PRIx64 " %04x",
-                        i, tmp.l.lower, tmp.l.upper);
-#else
-            cpu_fprintf(f, "FPR%d=%016" PRIx64,
-                        i, env->fpregs[i].mmx.q);
-#endif
+                        i, u.l.lower, u.l.upper);
             if ((i & 1) == 1)
                 cpu_fprintf(f, "\n");
             else
@@ -556,7 +547,7 @@ void cpu_x86_update_cr4(CPUX86State *env, uint32_t new_cr4)
 #if defined(CONFIG_USER_ONLY)
 
 int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
-                             int is_write, int mmu_idx, int is_softmmu)
+                             int is_write, int mmu_idx)
 {
     /* user mode only emulation */
     is_write &= 1;
@@ -583,7 +574,7 @@ int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
    1  = generate PF fault
 */
 int cpu_x86_handle_mmu_fault(CPUX86State *env, target_ulong addr,
-                             int is_write1, int mmu_idx, int is_softmmu)
+                             int is_write1, int mmu_idx)
 {
     uint64_t ptep, pte;
     target_ulong pde_addr, pte_addr;
@@ -1037,8 +1028,6 @@ int check_hw_breakpoints(CPUState *env, int force_dr6_update)
 
 static CPUDebugExcpHandler *prev_debug_excp_handler;
 
-void raise_exception_env(int exception_index, CPUState *env);
-
 static void breakpoint_handler(CPUState *env)
 {
     CPUBreakpoint *bp;
@@ -1065,91 +1054,138 @@ static void breakpoint_handler(CPUState *env)
         prev_debug_excp_handler(env);
 }
 
-/* This should come from sysemu.h - if we could include it here... */
-void qemu_system_reset_request(void);
+typedef struct MCEInjectionParams {
+    Monitor *mon;
+    CPUState *env;
+    int bank;
+    uint64_t status;
+    uint64_t mcg_status;
+    uint64_t addr;
+    uint64_t misc;
+    int flags;
+} MCEInjectionParams;
 
-static void qemu_inject_x86_mce(CPUState *cenv, int bank, uint64_t status,
-                        uint64_t mcg_status, uint64_t addr, uint64_t misc)
+static void do_inject_x86_mce(void *data)
 {
-    uint64_t mcg_cap = cenv->mcg_cap;
-    uint64_t *banks = cenv->mce_banks;
+    MCEInjectionParams *params = data;
+    CPUState *cenv = params->env;
+    uint64_t *banks = cenv->mce_banks + 4 * params->bank;
+
+    cpu_synchronize_state(cenv);
 
     /*
-     * if MSR_MCG_CTL is not all 1s, the uncorrected error
-     * reporting is disabled
+     * If there is an MCE exception being processed, ignore this SRAO MCE
+     * unless unconditional injection was requested.
      */
-    if ((status & MCI_STATUS_UC) && (mcg_cap & MCG_CTL_P) &&
-        cenv->mcg_ctl != ~(uint64_t)0)
+    if (!(params->flags & MCE_INJECT_UNCOND_AO)
+        && !(params->status & MCI_STATUS_AR)
+        && (cenv->mcg_status & MCG_STATUS_MCIP)) {
         return;
-    banks += 4 * bank;
-    /*
-     * if MSR_MCi_CTL is not all 1s, the uncorrected error
-     * reporting is disabled for the bank
-     */
-    if ((status & MCI_STATUS_UC) && banks[0] != ~(uint64_t)0)
-        return;
-    if (status & MCI_STATUS_UC) {
+    }
+
+    if (params->status & MCI_STATUS_UC) {
+        /*
+         * if MSR_MCG_CTL is not all 1s, the uncorrected error
+         * reporting is disabled
+         */
+        if ((cenv->mcg_cap & MCG_CTL_P) && cenv->mcg_ctl != ~(uint64_t)0) {
+            monitor_printf(params->mon,
+                           "CPU %d: Uncorrected error reporting disabled\n",
+                           cenv->cpu_index);
+            return;
+        }
+
+        /*
+         * if MSR_MCi_CTL is not all 1s, the uncorrected error
+         * reporting is disabled for the bank
+         */
+        if (banks[0] != ~(uint64_t)0) {
+            monitor_printf(params->mon,
+                           "CPU %d: Uncorrected error reporting disabled for"
+                           " bank %d\n",
+                           cenv->cpu_index, params->bank);
+            return;
+        }
+
         if ((cenv->mcg_status & MCG_STATUS_MCIP) ||
             !(cenv->cr[4] & CR4_MCE_MASK)) {
-            fprintf(stderr, "injects mce exception while previous "
-                    "one is in progress!\n");
+            monitor_printf(params->mon,
+                           "CPU %d: Previous MCE still in progress, raising"
+                           " triple fault\n",
+                           cenv->cpu_index);
             qemu_log_mask(CPU_LOG_RESET, "Triple fault\n");
             qemu_system_reset_request();
             return;
         }
-        if (banks[1] & MCI_STATUS_VAL)
-            status |= MCI_STATUS_OVER;
-        banks[2] = addr;
-        banks[3] = misc;
-        cenv->mcg_status = mcg_status;
-        banks[1] = status;
+        if (banks[1] & MCI_STATUS_VAL) {
+            params->status |= MCI_STATUS_OVER;
+        }
+        banks[2] = params->addr;
+        banks[3] = params->misc;
+        cenv->mcg_status = params->mcg_status;
+        banks[1] = params->status;
         cpu_interrupt(cenv, CPU_INTERRUPT_MCE);
     } else if (!(banks[1] & MCI_STATUS_VAL)
                || !(banks[1] & MCI_STATUS_UC)) {
-        if (banks[1] & MCI_STATUS_VAL)
-            status |= MCI_STATUS_OVER;
-        banks[2] = addr;
-        banks[3] = misc;
-        banks[1] = status;
-    } else
+        if (banks[1] & MCI_STATUS_VAL) {
+            params->status |= MCI_STATUS_OVER;
+        }
+        banks[2] = params->addr;
+        banks[3] = params->misc;
+        banks[1] = params->status;
+    } else {
         banks[1] |= MCI_STATUS_OVER;
+    }
 }
 
-void cpu_inject_x86_mce(CPUState *cenv, int bank, uint64_t status,
-                        uint64_t mcg_status, uint64_t addr, uint64_t misc,
-                        int broadcast)
+void cpu_x86_inject_mce(Monitor *mon, CPUState *cenv, int bank,
+                        uint64_t status, uint64_t mcg_status, uint64_t addr,
+                        uint64_t misc, int flags)
 {
+    MCEInjectionParams params = {
+        .mon = mon,
+        .env = cenv,
+        .bank = bank,
+        .status = status,
+        .mcg_status = mcg_status,
+        .addr = addr,
+        .misc = misc,
+        .flags = flags,
+    };
     unsigned bank_num = cenv->mcg_cap & 0xff;
     CPUState *env;
-    int flag = 0;
 
-    if (bank >= bank_num || !(status & MCI_STATUS_VAL)) {
+    if (!cenv->mcg_cap) {
+        monitor_printf(mon, "MCE injection not supported\n");
+        return;
+    }
+    if (bank >= bank_num) {
+        monitor_printf(mon, "Invalid MCE bank number\n");
+        return;
+    }
+    if (!(status & MCI_STATUS_VAL)) {
+        monitor_printf(mon, "Invalid MCE status code\n");
+        return;
+    }
+    if ((flags & MCE_INJECT_BROADCAST)
+        && !cpu_x86_support_mca_broadcast(cenv)) {
+        monitor_printf(mon, "Guest CPU does not support MCA broadcast\n");
         return;
     }
 
-    if (broadcast) {
-        if (!cpu_x86_support_mca_broadcast(cenv)) {
-            fprintf(stderr, "Current CPU does not support broadcast\n");
-            return;
-        }
-    }
-
-    if (kvm_enabled()) {
-        if (broadcast) {
-            flag |= MCE_BROADCAST;
-        }
-
-        kvm_inject_x86_mce(cenv, bank, status, mcg_status, addr, misc, flag);
-    } else {
-        qemu_inject_x86_mce(cenv, bank, status, mcg_status, addr, misc);
-        if (broadcast) {
-            for (env = first_cpu; env != NULL; env = env->next_cpu) {
-                if (cenv == env) {
-                    continue;
-                }
-                qemu_inject_x86_mce(env, 1, MCI_STATUS_VAL | MCI_STATUS_UC,
-                                    MCG_STATUS_MCIP | MCG_STATUS_RIPV, 0, 0);
+    run_on_cpu(cenv, do_inject_x86_mce, &params);
+    if (flags & MCE_INJECT_BROADCAST) {
+        params.bank = 1;
+        params.status = MCI_STATUS_VAL | MCI_STATUS_UC;
+        params.mcg_status = MCG_STATUS_MCIP | MCG_STATUS_RIPV;
+        params.addr = 0;
+        params.misc = 0;
+        for (env = first_cpu; env != NULL; env = env->next_cpu) {
+            if (cenv == env) {
+                continue;
             }
+            params.env = env;
+            run_on_cpu(cenv, do_inject_x86_mce, &params);
         }
     }
 }
@@ -1157,15 +1193,16 @@ void cpu_inject_x86_mce(CPUState *cenv, int bank, uint64_t status,
 
 static void mce_init(CPUX86State *cenv)
 {
-    unsigned int bank, bank_num;
+    unsigned int bank;
 
-    if (((cenv->cpuid_version >> 8)&0xf) >= 6
-        && (cenv->cpuid_features&(CPUID_MCE|CPUID_MCA)) == (CPUID_MCE|CPUID_MCA)) {
+    if (((cenv->cpuid_version >> 8) & 0xf) >= 6
+        && (cenv->cpuid_features & (CPUID_MCE | CPUID_MCA)) ==
+            (CPUID_MCE | CPUID_MCA)) {
         cenv->mcg_cap = MCE_CAP_DEF | MCE_BANKS_DEF;
         cenv->mcg_ctl = ~(uint64_t)0;
-        bank_num = MCE_BANKS_DEF;
-        for (bank = 0; bank < bank_num; bank++)
-            cenv->mce_banks[bank*4] = ~(uint64_t)0;
+        for (bank = 0; bank < MCE_BANKS_DEF; bank++) {
+            cenv->mce_banks[bank * 4] = ~(uint64_t)0;
+        }
     }
 }
 
@@ -1203,12 +1240,12 @@ CPUX86State *cpu_x86_init(const char *cpu_model)
     CPUX86State *env;
     static int inited;
 
-    env = qemu_mallocz(sizeof(CPUX86State));
+    env = g_malloc0(sizeof(CPUX86State));
     cpu_exec_init(env);
     env->cpu_model_str = cpu_model;
 
-    /* init various static tables */
-    if (!inited) {
+    /* init various static tables used in TCG mode */
+    if (tcg_enabled() && !inited) {
         inited = 1;
         optimize_flags_init();
 #ifndef CONFIG_USER_ONLY
@@ -1220,6 +1257,7 @@ CPUX86State *cpu_x86_init(const char *cpu_model)
         cpu_x86_close(env);
         return NULL;
     }
+    env->cpuid_apic_id = env->cpu_index;
     mce_init(env);
 
     qemu_init_vcpu(env);
@@ -1231,8 +1269,11 @@ CPUX86State *cpu_x86_init(const char *cpu_model)
 void do_cpu_init(CPUState *env)
 {
     int sipi = env->interrupt_request & CPU_INTERRUPT_SIPI;
+    uint64_t pat = env->pat;
+
     cpu_reset(env);
     env->interrupt_request = sipi;
+    env->pat = pat;
     apic_init_reset(env->apic_state);
     env->halted = !cpu_is_bsp(env);
 }

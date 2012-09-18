@@ -2,7 +2,6 @@
 #include "qemu-error.h"
 #include "qemu-option.h"
 #include "qemu-config.h"
-#include "sysemu.h"
 #include "hw/qdev.h"
 
 static QemuOptsList qemu_drive_opts = {
@@ -24,6 +23,7 @@ static QemuOptsList qemu_drive_opts = {
         },{
             .name = "index",
             .type = QEMU_OPT_NUMBER,
+            .help = "index number",
         },{
             .name = "cyls",
             .type = QEMU_OPT_NUMBER,
@@ -47,6 +47,7 @@ static QemuOptsList qemu_drive_opts = {
         },{
             .name = "snapshot",
             .type = QEMU_OPT_BOOL,
+            .help = "enable/disable snapshot mode",
         },{
             .name = "file",
             .type = QEMU_OPT_STRING,
@@ -54,7 +55,8 @@ static QemuOptsList qemu_drive_opts = {
         },{
             .name = "cache",
             .type = QEMU_OPT_STRING,
-            .help = "host cache usage (none, writeback, writethrough, unsafe)",
+            .help = "host cache usage (none, writeback, writethrough, "
+                    "directsync, unsafe)",
         },{
             .name = "aio",
             .type = QEMU_OPT_STRING,
@@ -66,12 +68,15 @@ static QemuOptsList qemu_drive_opts = {
         },{
             .name = "serial",
             .type = QEMU_OPT_STRING,
+            .help = "disk serial number",
         },{
             .name = "rerror",
             .type = QEMU_OPT_STRING,
+            .help = "read error action",
         },{
             .name = "werror",
             .type = QEMU_OPT_STRING,
+            .help = "write error action",
         },{
             .name = "addr",
             .type = QEMU_OPT_STRING,
@@ -79,6 +84,7 @@ static QemuOptsList qemu_drive_opts = {
         },{
             .name = "readonly",
             .type = QEMU_OPT_BOOL,
+            .help = "open drive file as read-only",
         },
         { /* end of list */ }
     },
@@ -159,11 +165,11 @@ static QemuOptsList qemu_chardev_opts = {
 
 QemuOptsList qemu_fsdev_opts = {
     .name = "fsdev",
-    .implied_opt_name = "fstype",
+    .implied_opt_name = "fsdriver",
     .head = QTAILQ_HEAD_INITIALIZER(qemu_fsdev_opts.head),
     .desc = {
         {
-            .name = "fstype",
+            .name = "fsdriver",
             .type = QEMU_OPT_STRING,
         }, {
             .name = "path",
@@ -171,18 +177,25 @@ QemuOptsList qemu_fsdev_opts = {
         }, {
             .name = "security_model",
             .type = QEMU_OPT_STRING,
+        }, {
+            .name = "writeout",
+            .type = QEMU_OPT_STRING,
+        }, {
+            .name = "readonly",
+            .type = QEMU_OPT_BOOL,
         },
+
         { /*End of list */ }
     },
 };
 
 QemuOptsList qemu_virtfs_opts = {
     .name = "virtfs",
-    .implied_opt_name = "fstype",
+    .implied_opt_name = "fsdriver",
     .head = QTAILQ_HEAD_INITIALIZER(qemu_virtfs_opts.head),
     .desc = {
         {
-            .name = "fstype",
+            .name = "fsdriver",
             .type = QEMU_OPT_STRING,
         }, {
             .name = "path",
@@ -193,6 +206,12 @@ QemuOptsList qemu_virtfs_opts = {
         }, {
             .name = "security_model",
             .type = QEMU_OPT_STRING,
+        }, {
+            .name = "writeout",
+            .type = QEMU_OPT_STRING,
+        }, {
+            .name = "readonly",
+            .type = QEMU_OPT_BOOL,
         },
 
         { /*End of list */ }
@@ -297,20 +316,21 @@ static QemuOptsList qemu_mon_opts = {
     },
 };
 
-#ifdef CONFIG_SIMPLE_TRACE
 static QemuOptsList qemu_trace_opts = {
     .name = "trace",
     .implied_opt_name = "trace",
     .head = QTAILQ_HEAD_INITIALIZER(qemu_trace_opts.head),
     .desc = {
         {
+            .name = "events",
+            .type = QEMU_OPT_STRING,
+        },{
             .name = "file",
             .type = QEMU_OPT_STRING,
         },
-        { /* end if list */ }
+        { /* end of list */ }
     },
 };
-#endif
 
 static QemuOptsList qemu_cpudef_opts = {
     .name = "cpudef",
@@ -386,6 +406,12 @@ QemuOptsList qemu_spice_opts = {
             .name = "disable-ticketing",
             .type = QEMU_OPT_BOOL,
         },{
+            .name = "disable-copy-paste",
+            .type = QEMU_OPT_BOOL,
+        },{
+            .name = "sasl",
+            .type = QEMU_OPT_BOOL,
+        },{
             .name = "x509-dir",
             .type = QEMU_OPT_STRING,
         },{
@@ -431,7 +457,7 @@ QemuOptsList qemu_spice_opts = {
             .name = "playback-compression",
             .type = QEMU_OPT_BOOL,
         },
-        { /* end if list */ }
+        { /* end of list */ }
     },
 };
 
@@ -447,7 +473,51 @@ QemuOptsList qemu_option_rom_opts = {
             .name = "romfile",
             .type = QEMU_OPT_STRING,
         },
-        { /* end if list */ }
+        { /* end of list */ }
+    },
+};
+
+static QemuOptsList qemu_machine_opts = {
+    .name = "machine",
+    .implied_opt_name = "type",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_machine_opts.head),
+    .desc = {
+        {
+            .name = "type",
+            .type = QEMU_OPT_STRING,
+            .help = "emulated machine"
+        }, {
+            .name = "accel",
+            .type = QEMU_OPT_STRING,
+            .help = "accelerator list",
+        },
+        { /* End of list */ }
+    },
+};
+
+QemuOptsList qemu_boot_opts = {
+    .name = "boot-opts",
+    .head = QTAILQ_HEAD_INITIALIZER(qemu_boot_opts.head),
+    .desc = {
+        /* the three names below are not used now */
+        {
+            .name = "order",
+            .type = QEMU_OPT_STRING,
+        }, {
+            .name = "once",
+            .type = QEMU_OPT_STRING,
+        }, {
+            .name = "menu",
+            .type = QEMU_OPT_STRING,
+        /* following are really used */
+        }, {
+            .name = "splash",
+            .type = QEMU_OPT_STRING,
+        }, {
+            .name = "splash-time",
+            .type = QEMU_OPT_STRING,
+        },
+        { /*End of list */ }
     },
 };
 
@@ -461,10 +531,10 @@ static QemuOptsList *vm_config_groups[32] = {
     &qemu_global_opts,
     &qemu_mon_opts,
     &qemu_cpudef_opts,
-#ifdef CONFIG_SIMPLE_TRACE
     &qemu_trace_opts,
-#endif
     &qemu_option_rom_opts,
+    &qemu_machine_opts,
+    &qemu_boot_opts,
     NULL,
 };
 

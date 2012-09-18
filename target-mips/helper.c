@@ -24,7 +24,6 @@
 #include <signal.h>
 
 #include "cpu.h"
-#include "exec-all.h"
 
 enum {
     TLBRET_DIRTY = -4,
@@ -267,39 +266,37 @@ target_phys_addr_t cpu_get_phys_page_debug(CPUState *env, target_ulong addr)
 #endif
 
 int cpu_mips_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                               int mmu_idx, int is_softmmu)
+                               int mmu_idx)
 {
 #if !defined(CONFIG_USER_ONLY)
     target_phys_addr_t physical;
     int prot;
-#endif
     int access_type;
+#endif
     int ret = 0;
 
 #if 0
     log_cpu_state(env, 0);
 #endif
-    qemu_log("%s pc " TARGET_FMT_lx " ad " TARGET_FMT_lx " rw %d mmu_idx %d smmu %d\n",
-              __func__, env->active_tc.PC, address, rw, mmu_idx, is_softmmu);
+    qemu_log("%s pc " TARGET_FMT_lx " ad " TARGET_FMT_lx " rw %d mmu_idx %d\n",
+              __func__, env->active_tc.PC, address, rw, mmu_idx);
 
     rw &= 1;
 
     /* data access */
+#if !defined(CONFIG_USER_ONLY)
     /* XXX: put correct access by using cpu_restore_state()
        correctly */
     access_type = ACCESS_INT;
-#if defined(CONFIG_USER_ONLY)
-    ret = TLBRET_NOMATCH;
-#else
     ret = get_physical_address(env, &physical, &prot,
                                address, rw, access_type);
     qemu_log("%s address=" TARGET_FMT_lx " ret %d physical " TARGET_FMT_plx " prot %d\n",
               __func__, address, ret, physical, prot);
     if (ret == TLBRET_MATCH) {
-       tlb_set_page(env, address & TARGET_PAGE_MASK,
-                    physical & TARGET_PAGE_MASK, prot | PAGE_EXEC,
-                    mmu_idx, TARGET_PAGE_SIZE);
-       ret = 0;
+        tlb_set_page(env, address & TARGET_PAGE_MASK,
+                     physical & TARGET_PAGE_MASK, prot | PAGE_EXEC,
+                     mmu_idx, TARGET_PAGE_SIZE);
+        ret = 0;
     } else if (ret < 0)
 #endif
     {
@@ -485,18 +482,18 @@ void do_interrupt (CPUState *env)
             unsigned int vector;
             unsigned int pending = (env->CP0_Cause & CP0Ca_IP_mask) >> 8;
 
+            pending &= env->CP0_Status >> 8;
             /* Compute the Vector Spacing.  */
             spacing = (env->CP0_IntCtl >> CP0IntCtl_VS) & ((1 << 6) - 1);
             spacing <<= 5;
 
             if (env->CP0_Config3 & (1 << CP0C3_VInt)) {
                 /* For VInt mode, the MIPS computes the vector internally.  */
-                for (vector = 0; vector < 8; vector++) {
-                    if (pending & 1) {
+                for (vector = 7; vector > 0; vector--) {
+                    if (pending & (1 << vector)) {
                         /* Found it.  */
                         break;
                     }
-                    pending >>= 1;
                 }
             } else {
                 /* For VEIC mode, the external interrupt controller feeds the

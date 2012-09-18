@@ -41,20 +41,18 @@
 #define HID_SET_IDLE		0x210a
 #define HID_SET_PROTOCOL	0x210b
 
-enum {
-    WACOM_MODE_HID = 1,
-    WACOM_MODE_WACOM = 2,
-} ;
-
 typedef struct USBWacomState {
     USBDevice dev;
     QEMUPutMouseEntry *eh_entry;
-    int32_t dx, dy, dz, buttons_state;
-    int32_t x, y;
-    int32_t mouse_grabbed;
-    uint8_t mode;
+    int dx, dy, dz, buttons_state;
+    int x, y;
+    int mouse_grabbed;
+    enum {
+        WACOM_MODE_HID = 1,
+        WACOM_MODE_WACOM = 2,
+    } mode;
     uint8_t idle;
-    int32_t changed;
+    int changed;
 } USBWacomState;
 
 enum {
@@ -110,6 +108,7 @@ static const USBDescDevice desc_device_wacom = {
             .bConfigurationValue   = 1,
             .bmAttributes          = 0x80,
             .bMaxPower             = 40,
+            .nif = 1,
             .ifs = &desc_iface_wacom,
         },
     },
@@ -251,13 +250,13 @@ static void usb_wacom_handle_reset(USBDevice *dev)
     s->mode = WACOM_MODE_HID;
 }
 
-static int usb_wacom_handle_control(USBDevice *dev, int request, int value,
-                                    int index, int length, uint8_t *data)
+static int usb_wacom_handle_control(USBDevice *dev, USBPacket *p,
+               int request, int value, int index, int length, uint8_t *data)
 {
     USBWacomState *s = (USBWacomState *) dev;
     int ret;
 
-    ret = usb_desc_handle_control(dev, request, value, index, length, data);
+    ret = usb_desc_handle_control(dev, p, request, value, index, length, data);
     if (ret >= 0) {
         return ret;
     }
@@ -275,8 +274,6 @@ static int usb_wacom_handle_control(USBDevice *dev, int request, int value,
         if (s->mouse_grabbed) {
             qemu_remove_mouse_event_handler(s->eh_entry);
             s->mouse_grabbed = 0;
-            s->changed = 1;
-            dev->setup_index=0;
         }
         s->mode = data[0];
         ret = 0;
@@ -311,6 +308,7 @@ static int usb_wacom_handle_control(USBDevice *dev, int request, int value,
 static int usb_wacom_handle_data(USBDevice *dev, USBPacket *p)
 {
     USBWacomState *s = (USBWacomState *) dev;
+    uint8_t buf[p->iov.size];
     int ret = 0;
 
     switch (p->pid) {
@@ -320,9 +318,10 @@ static int usb_wacom_handle_data(USBDevice *dev, USBPacket *p)
                 return USB_RET_NAK;
             s->changed = 0;
             if (s->mode == WACOM_MODE_HID)
-                ret = usb_mouse_poll(s, p->data, p->len);
+                ret = usb_mouse_poll(s, buf, p->iov.size);
             else if (s->mode == WACOM_MODE_WACOM)
-                ret = usb_wacom_poll(s, p->data, p->len);
+                ret = usb_wacom_poll(s, buf, p->iov.size);
+            usb_packet_copy(p, buf, ret);
             break;
         }
         /* Fall through.  */
@@ -352,70 +351,9 @@ static int usb_wacom_initfn(USBDevice *dev)
     return 0;
 }
 
-/* Remove mouse handlers before loading.  */
-static int wacom_pre_load(void *opaque)
-{
-    USBWacomState *s = (USBWacomState *)opaque;
-
-    if (s->eh_entry) {
-        qemu_remove_mouse_event_handler(s->eh_entry);
-	}
-
-	return 0;
-}
-
-static int wacom_post_load(void *opaque, int version_id)
-{
-    USBWacomState *s = (USBWacomState *)opaque;
-
-    s->changed = 1;
-	if (s->mouse_grabbed && s->mode == WACOM_MODE_WACOM) {
-        s->eh_entry = qemu_add_mouse_event_handler(usb_wacom_event, s, 1,
-                        "QEMU PenPartner tablet");
-	} else if (s->mouse_grabbed && s->mode == WACOM_MODE_HID) {
-        s->eh_entry = qemu_add_mouse_event_handler(usb_mouse_event, s, 0,
-                        "QEMU PenPartner tablet");
-	}
-	if (s->mouse_grabbed) {
-        qemu_activate_mouse_event_handler(s->eh_entry);
-	}
-
-	return 0;
-}
-
-static VMStateDescription vmsd_usbdevice = {
-	.name = "wacom-tablet_usbdevice",
-    .version_id = 1,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-    .fields = (VMStateField []) {
-        VMSTATE_UINT8(addr, USBDevice),
-   	    VMSTATE_INT32(state, USBDevice),
-        VMSTATE_END_OF_LIST()
-    }
-};
-
-static VMStateDescription vmsd = {
-	.name = "wacom-tablet",
-    .version_id = 2,
-    .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
-	.pre_load = wacom_pre_load,
-	.post_load = wacom_post_load,
-    .fields = (VMStateField []) {
-        VMSTATE_STRUCT(dev, USBWacomState, 1, vmsd_usbdevice, USBDevice),
-        VMSTATE_INT32(dx, USBWacomState),
-        VMSTATE_INT32(dy, USBWacomState),
-        VMSTATE_INT32(dz, USBWacomState),
-        VMSTATE_INT32(buttons_state, USBWacomState),
-        VMSTATE_INT32(x, USBWacomState),
-        VMSTATE_INT32(y, USBWacomState),
-        VMSTATE_INT32(mouse_grabbed, USBWacomState),
-        VMSTATE_UINT8(mode, USBWacomState),
-        VMSTATE_UINT8(idle, USBWacomState),
-        VMSTATE_INT32(changed, USBWacomState),
-        VMSTATE_END_OF_LIST()
-    }
+static const VMStateDescription vmstate_usb_wacom = {
+    .name = "usb-wacom",
+    .unmigratable = 1,
 };
 
 static struct USBDeviceInfo wacom_info = {
@@ -425,7 +363,7 @@ static struct USBDeviceInfo wacom_info = {
     .usbdevice_name = "wacom-tablet",
     .usb_desc       = &desc_wacom,
     .qdev.size      = sizeof(USBWacomState),
-    .qdev.vmsd      = &vmsd,
+    .qdev.vmsd      = &vmstate_usb_wacom,
     .init           = usb_wacom_initfn,
     .handle_packet  = usb_generic_handle_packet,
     .handle_reset   = usb_wacom_handle_reset,

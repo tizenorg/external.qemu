@@ -15,11 +15,12 @@
 #include "monitor.h"
 #include "qemu-timer.h"
 #include "qemu-log.h"
-#include "sysemu.h"
+#include "migration.h"
 
 #include <sys/time.h>
 
 QEMUClock *rt_clock;
+QEMUClock *vm_clock;
 
 FILE *logfile;
 
@@ -28,10 +29,6 @@ struct QEMUBH
     QEMUBHFunc *cb;
     void *opaque;
 };
-
-void qemu_service_io(void)
-{
-}
 
 Monitor *cur_mon;
 
@@ -56,51 +53,8 @@ void monitor_print_filename(Monitor *mon, const char *filename)
 {
 }
 
-void async_context_push(void)
-{
-}
-
-void async_context_pop(void)
-{
-}
-
-int get_async_context_id(void)
-{
-    return 0;
-}
-
 void monitor_protocol_event(MonitorEvent event, QObject *data)
 {
-}
-
-QEMUBH *qemu_bh_new(QEMUBHFunc *cb, void *opaque)
-{
-    QEMUBH *bh;
-
-    bh = qemu_malloc(sizeof(*bh));
-    bh->cb = cb;
-    bh->opaque = opaque;
-
-    return bh;
-}
-
-int qemu_bh_poll(void)
-{
-    return 0;
-}
-
-void qemu_bh_schedule(QEMUBH *bh)
-{
-    bh->cb(bh->opaque);
-}
-
-void qemu_bh_cancel(QEMUBH *bh)
-{
-}
-
-void qemu_bh_delete(QEMUBH *bh)
-{
-    qemu_free(bh);
 }
 
 int qemu_set_fd_handler2(int fd,
@@ -110,4 +64,40 @@ int qemu_set_fd_handler2(int fd,
                          void *opaque)
 {
     return 0;
+}
+
+void qemu_notify_event(void)
+{
+}
+
+QEMUTimer *qemu_new_timer(QEMUClock *clock, int scale,
+                          QEMUTimerCB *cb, void *opaque)
+{
+    return g_malloc(1);
+}
+
+void qemu_free_timer(QEMUTimer *ts)
+{
+    g_free(ts);
+}
+
+void qemu_del_timer(QEMUTimer *ts)
+{
+}
+
+void qemu_mod_timer(QEMUTimer *ts, int64_t expire_time)
+{
+}
+
+int64_t qemu_get_clock_ns(QEMUClock *clock)
+{
+    return 0;
+}
+
+void migrate_add_blocker(Error *reason)
+{
+}
+
+void migrate_del_blocker(Error *reason)
+{
 }

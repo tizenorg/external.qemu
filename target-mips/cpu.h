@@ -1,6 +1,8 @@
 #if !defined (__MIPS_CPU_H__)
 #define __MIPS_CPU_H__
 
+//#define DEBUG_OP
+
 #define TARGET_HAS_ICE 1
 
 #define ELF_MACHINE	EM_MIPS
@@ -63,7 +65,7 @@ union fpr_t {
     uint32_t w[2]; /* binary single fixed-point */
 };
 /* define FP_ENDIAN_IDX to access the same location
- * in the fpr_t union regardless of the host endianess
+ * in the fpr_t union regardless of the host endianness
  */
 #if defined(HOST_WORDS_BIGENDIAN)
 #  define FP_ENDIAN_IDX 1
@@ -493,8 +495,8 @@ void r4k_helper_tlbwr (void);
 void r4k_helper_tlbp (void);
 void r4k_helper_tlbr (void);
 
-void do_unassigned_access(target_phys_addr_t addr, int is_write, int is_exec,
-                          int unused, int size);
+void cpu_unassigned_access(CPUState *env, target_phys_addr_t addr,
+                           int is_write, int is_exec, int unused, int size);
 #endif
 
 void mips_cpu_list (FILE *f, fprintf_function cpu_fprintf);
@@ -535,6 +537,10 @@ static inline int cpu_mips_hw_interrupts_pending(CPUState *env)
     if (!(env->CP0_Status & (1 << CP0St_IE)) ||
         (env->CP0_Status & (1 << CP0St_EXL)) ||
         (env->CP0_Status & (1 << CP0St_ERL)) ||
+        /* Note that the TCStatus IXMT field is initialized to zero,
+           and only MT capable cores can set it to one. So we don't
+           need to check for MT capabilities here.  */
+        (env->active_tc.CP0_TCStatus & (1 << CP0TCSt_IXMT)) ||
         (env->hflags & MIPS_HFLAG_DM)) {
         /* Interrupts are disabled */
         return 0;
@@ -616,6 +622,14 @@ enum {
 /* Dummy exception for conditional stores.  */
 #define EXCP_SC 0x100
 
+/*
+ * This is an interrnally generated WAKE request line.
+ * It is driven by the CPU itself. Raised when the MT
+ * block wants to wake a VPE from an inactive state and
+ * cleared when VPE goes from active to inactive.
+ */
+#define CPU_INTERRUPT_WAKE CPU_INTERRUPT_TGT_INT_0
+
 int cpu_mips_exec(CPUMIPSState *s);
 CPUMIPSState *cpu_mips_init(const char *cpu_model);
 //~ uint32_t cpu_mips_get_clock (void);
@@ -634,7 +648,7 @@ void cpu_mips_soft_irq(CPUState *env, int irq, int level);
 
 /* helper.c */
 int cpu_mips_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                               int mmu_idx, int is_softmmu);
+                               int mmu_idx);
 #define cpu_handle_mmu_fault cpu_mips_handle_mmu_fault
 void do_interrupt (CPUState *env);
 #if !defined(CONFIG_USER_ONLY)
@@ -654,6 +668,73 @@ static inline void cpu_get_tb_cpu_state(CPUState *env, target_ulong *pc,
 static inline void cpu_set_tls(CPUState *env, target_ulong newtls)
 {
     env->tls_value = newtls;
+}
+
+static inline int mips_vpe_active(CPUState *env)
+{
+    int active = 1;
+
+    /* Check that the VPE is enabled.  */
+    if (!(env->mvp->CP0_MVPControl & (1 << CP0MVPCo_EVP))) {
+        active = 0;
+    }
+    /* Check that the VPE is actived.  */
+    if (!(env->CP0_VPEConf0 & (1 << CP0VPEC0_VPA))) {
+        active = 0;
+    }
+
+    /* Now verify that there are active thread contexts in the VPE.
+
+       This assumes the CPU model will internally reschedule threads
+       if the active one goes to sleep. If there are no threads available
+       the active one will be in a sleeping state, and we can turn off
+       the entire VPE.  */
+    if (!(env->active_tc.CP0_TCStatus & (1 << CP0TCSt_A))) {
+        /* TC is not activated.  */
+        active = 0;
+    }
+    if (env->active_tc.CP0_TCHalt & 1) {
+        /* TC is in halt state.  */
+        active = 0;
+    }
+
+    return active;
+}
+
+static inline int cpu_has_work(CPUState *env)
+{
+    int has_work = 0;
+
+    /* It is implementation dependent if non-enabled interrupts
+       wake-up the CPU, however most of the implementations only
+       check for interrupts that can be taken. */
+    if ((env->interrupt_request & CPU_INTERRUPT_HARD) &&
+        cpu_mips_hw_interrupts_pending(env)) {
+        has_work = 1;
+    }
+
+    /* MIPS-MT has the ability to halt the CPU.  */
+    if (env->CP0_Config3 & (1 << CP0C3_MT)) {
+        /* The QEMU model will issue an _WAKE request whenever the CPUs
+           should be woken up.  */
+        if (env->interrupt_request & CPU_INTERRUPT_WAKE) {
+            has_work = 1;
+        }
+
+        if (!mips_vpe_active(env)) {
+            has_work = 0;
+        }
+    }
+    return has_work;
+}
+
+#include "exec-all.h"
+
+static inline void cpu_pc_from_tb(CPUState *env, TranslationBlock *tb)
+{
+    env->active_tc.PC = tb->pc;
+    env->hflags &= ~MIPS_HFLAG_BMASK;
+    env->hflags |= tb->flags & MIPS_HFLAG_BMASK;
 }
 
 #endif /* !defined (__MIPS_CPU_H__) */

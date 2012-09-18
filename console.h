@@ -4,6 +4,8 @@
 #include "qemu-char.h"
 #include "qdict.h"
 #include "notify.h"
+#include "qerror.h"
+#include "monitor.h"
 
 /* keyboard/mouse support */
 
@@ -43,8 +45,6 @@ typedef struct QEMUPutLEDEntry {
 
 void qemu_add_kbd_event_handler(QEMUPutKBDEvent *func, void *opaque);
 void qemu_remove_kbd_event_handler(void);
-void qemu_add_ps2kbd_event_handler(QEMUPutKBDEvent *func, void *opaque);
-void qemu_remove_ps2kbd_event_handler(void);
 QEMUPutMouseEntry *qemu_add_mouse_event_handler(QEMUPutMouseEvent *func,
                                                 void *opaque, int absolute,
                                                 const char *name);
@@ -55,7 +55,11 @@ QEMUPutLEDEntry *qemu_add_led_event_handler(QEMUPutLEDEvent *func, void *opaque)
 void qemu_remove_led_event_handler(QEMUPutLEDEntry *entry);
 
 void kbd_put_keycode(int keycode);
+#ifdef CONFIG_MARU
+void qemu_add_ps2kbd_event_handler(QEMUPutKBDEvent *func, void *opaque);
+void qemu_remove_ps2kbd_event_handler(void);
 void ps2kbd_put_keycode(int keycode);
+#endif
 void kbd_put_ledstate(int ledstate);
 void kbd_mouse_event(int dx, int dy, int dz, int buttons_state);
 
@@ -110,7 +114,7 @@ void kbd_put_keysym(int keysym);
 #define QEMU_ALLOCATED_FLAG     0x02
 #define QEMU_REALPIXELS_FLAG    0x04
 
-struct QEMU_PixelFormat {
+struct PixelFormat {
     uint8_t bits_per_pixel;
     uint8_t bytes_per_pixel;
     uint8_t depth; /* color depth in bits */
@@ -127,7 +131,7 @@ struct DisplaySurface {
     int linesize;        /* bytes per line */
     uint8_t *data;
 
-    struct QEMU_PixelFormat pf;
+    struct PixelFormat pf;
 };
 
 /* cursor data format is 32bit RGBA */
@@ -192,6 +196,8 @@ void register_displaystate(DisplayState *ds);
 DisplayState *get_displaystate(void);
 DisplaySurface* qemu_create_displaysurface_from(int width, int height, int bpp,
                                                 int linesize, uint8_t *data);
+void qemu_alloc_display(DisplaySurface *surface, int width, int height,
+                        int linesize, PixelFormat pf, int newflags);
 PixelFormat qemu_different_endianness_pixelformat(int bpp);
 PixelFormat qemu_default_pixelformat(int bpp);
 
@@ -327,7 +333,12 @@ static inline int ds_get_bytes_per_pixel(DisplayState *ds)
     return ds->surface->pf.bytes_per_pixel;
 }
 
+#ifdef CONFIG_CURSES
+#include <curses.h>
+typedef chtype console_ch_t;
+#else
 typedef unsigned long console_ch_t;
+#endif
 static inline void console_write_ch(console_ch_t *dest, uint32_t ch)
 {
     if (!(ch & 0xff))
@@ -353,7 +364,7 @@ void vga_hw_text_update(console_ch_t *chardata);
 
 int is_graphic_console(void);
 int is_fixedsize_console(void);
-CharDriverState *text_console_init(QemuOpts *opts);
+int text_console_init(QemuOpts *opts, CharDriverState **_chr);
 void text_consoles_set_display(DisplayState *ds);
 void console_select(unsigned int index);
 void console_color_init(DisplayState *ds);
@@ -363,9 +374,6 @@ void qemu_console_copy(DisplayState *ds, int src_x, int src_y,
 
 /* sdl.c */
 void sdl_display_init(DisplayState *ds, int full_screen, int no_frame);
-void sdl_display_set_rotation(int rot);
-void sdl_display_set_window_size(int w, int h);
-void sdl_display_force_refresh(void);
 
 /* cocoa.m */
 void cocoa_display_init(DisplayState *ds, int full_screen);
@@ -374,12 +382,24 @@ void cocoa_display_init(DisplayState *ds, int full_screen);
 void vnc_display_init(DisplayState *ds);
 void vnc_display_close(DisplayState *ds);
 int vnc_display_open(DisplayState *ds, const char *display);
-int vnc_display_password(DisplayState *ds, const char *password);
+void vnc_display_add_client(DisplayState *ds, int csock, int skipauth);
 int vnc_display_disable_login(DisplayState *ds);
-int vnc_display_pw_expire(DisplayState *ds, time_t expires);
-void do_info_vnc_print(Monitor *mon, const QObject *data);
-void do_info_vnc(Monitor *mon, QObject **ret_data);
 char *vnc_display_local_addr(DisplayState *ds);
+#ifdef CONFIG_VNC
+int vnc_display_password(DisplayState *ds, const char *password);
+int vnc_display_pw_expire(DisplayState *ds, time_t expires);
+#else
+static inline int vnc_display_password(DisplayState *ds, const char *password)
+{
+    qerror_report(QERR_FEATURE_DISABLED, "vnc");
+    return -ENODEV;
+}
+static inline int vnc_display_pw_expire(DisplayState *ds, time_t expires)
+{
+    qerror_report(QERR_FEATURE_DISABLED, "vnc");
+    return -ENODEV;
+};
+#endif
 
 /* curses.c */
 void curses_display_init(DisplayState *ds, int full_screen);

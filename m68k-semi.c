@@ -70,12 +70,12 @@ struct m68k_gdb_stat {
   gdb_time_t  gdb_st_atime;   /* time of last access */
   gdb_time_t  gdb_st_mtime;   /* time of last modification */
   gdb_time_t  gdb_st_ctime;   /* time of last change */
-} __attribute__((packed));
+} QEMU_PACKED;
 
 struct gdb_timeval {
   gdb_time_t tv_sec;  /* second */
   uint64_t tv_usec;   /* microsecond */
-} __attribute__((packed));
+} QEMU_PACKED;
 
 #define GDB_O_RDONLY   0x0
 #define GDB_O_WRONLY   0x1
@@ -370,7 +370,7 @@ void do_m68k_semihosting(CPUM68KState *env, int nr)
         TaskState *ts = env->opaque;
         /* Allocate the heap using sbrk.  */
         if (!ts->heap_limit) {
-            long ret;
+            abi_ulong ret;
             uint32_t size;
             uint32_t base;
 
@@ -379,8 +379,9 @@ void do_m68k_semihosting(CPUM68KState *env, int nr)
             /* Try a big heap, and reduce the size if that fails.  */
             for (;;) {
                 ret = do_brk(base + size);
-                if (ret != -1)
+                if (ret >= (base + size)) {
                     break;
+                }
                 size >>= 1;
             }
             ts->heap_limit = base + size;

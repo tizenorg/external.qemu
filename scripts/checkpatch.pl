@@ -859,7 +859,7 @@ sub annotate_values {
 				$av_preprocessor = 0;
 			}
 
-		} elsif ($cur =~ /^(\(\s*$Type\s*)\)/) {
+		} elsif ($cur =~ /^(\(\s*$Type\s*)\)/ && $av_pending eq '_') {
 			print "CAST($1)\n" if ($dbg_values > 1);
 			push(@av_paren_type, $type);
 			$type = 'C';
@@ -1495,7 +1495,7 @@ sub process {
 		next if ($realfile !~ /\.(h|c|pl)$/);
 
 # in QEMU, no tabs are allowed
-		if ($rawline =~ /\t/) {
+		if ($rawline =~ /^\+.*\t/) {
 			my $herevet = "$here\n" . cat_vet($rawline) . "\n";
 			ERROR("code indent should never use tabs\n" . $herevet);
 			$rpt_cleaners = 1;
@@ -2068,8 +2068,10 @@ sub process {
 					}
 
 				# , must have a space on the right.
+                                # not required when having a single },{ on one line
 				} elsif ($op eq ',') {
-					if ($ctx !~ /.x[WEC]/ && $cc !~ /^}/) {
+					if ($ctx !~ /.x[WEC]/ && $cc !~ /^}/ &&
+                                            ($elements[$n] . $elements[$n + 2]) !~ " *}{") {
 						ERROR("space required after that '$op' $at\n" . $hereptr);
 					}
 
@@ -2202,12 +2204,6 @@ sub process {
 		    $line !~ /for\s*\(.*;\s+\)/ &&
 		    $line !~ /:\s+\)/) {
 			ERROR("space prohibited before that close parenthesis ')'\n" . $herecurr);
-		}
-
-#goto labels aren't indented, allow a single space however
-		if ($line=~/^.\s+[A-Za-z\d_]+:(?![0-9]+)/ and
-		   !($line=~/^. [A-Za-z\d_]+:/) and !($line=~/^.\s+default:/)) {
-			WARN("labels should not be indented\n" . $herecurr);
 		}
 
 # Return is not a function.
@@ -2530,13 +2526,14 @@ sub process {
 						$allowed = 1;
 					}
 				}
-				if (!$seen) {
+				if ($seen != ($#chunks + 1)) {
 					WARN("braces {} are necessary for all arms of this statement\n" . $herectx);
 				}
 			}
 		}
 		if (!defined $suppress_ifbraces{$linenr - 1} &&
 					$line =~ /\b(if|while|for|else)\b/ &&
+					$line !~ /\#\s*if/ &&
 					$line !~ /\#\s*else/) {
 			my $allowed = 0;
 

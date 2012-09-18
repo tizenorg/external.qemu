@@ -50,6 +50,7 @@
 struct xlx_ethlite
 {
     SysBusDevice busdev;
+    MemoryRegion mmio;
     qemu_irq irq;
     NICState *nic;
     NICConf conf;
@@ -70,7 +71,8 @@ static inline void eth_pulse_irq(struct xlx_ethlite *s)
     }
 }
 
-static uint32_t eth_readl (void *opaque, target_phys_addr_t addr)
+static uint64_t
+eth_read(void *opaque, target_phys_addr_t addr, unsigned int size)
 {
     struct xlx_ethlite *s = opaque;
     uint32_t r = 0;
@@ -90,23 +92,20 @@ static uint32_t eth_readl (void *opaque, target_phys_addr_t addr)
             D(qemu_log("%s %x=%x\n", __func__, addr * 4, r));
             break;
 
-        /* Rx packet data is endian fixed at the way into the rx rams. This
-         * speeds things up because the ethlite MAC does not have a len
-         * register. That means the CPU will issue MMIO reads for the entire
-         * 2k rx buffer even for small packets.
-         */
         default:
-            r = s->regs[addr];
+            r = tswap32(s->regs[addr]);
             break;
     }
     return r;
 }
 
 static void
-eth_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
+eth_write(void *opaque, target_phys_addr_t addr,
+          uint64_t val64, unsigned int size)
 {
     struct xlx_ethlite *s = opaque;
     unsigned int base = 0;
+    uint32_t value = val64;
 
     addr >>= 2;
     switch (addr) 
@@ -145,19 +144,20 @@ eth_writel (void *opaque, target_phys_addr_t addr, uint32_t value)
             s->regs[addr] = value;
             break;
 
-        /* Packet data, make sure it stays BE.  */
         default:
-            s->regs[addr] = cpu_to_be32(value);
+            s->regs[addr] = tswap32(value);
             break;
     }
 }
 
-static CPUReadMemoryFunc * const eth_read[] = {
-    NULL, NULL, &eth_readl,
-};
-
-static CPUWriteMemoryFunc * const eth_write[] = {
-    NULL, NULL, &eth_writel,
+static const MemoryRegionOps eth_ops = {
+    .read = eth_read,
+    .write = eth_write,
+    .endianness = DEVICE_NATIVE_ENDIAN,
+    .valid = {
+        .min_access_size = 4,
+        .max_access_size = 4
+    }
 };
 
 static int eth_can_rx(VLANClientState *nc)
@@ -172,7 +172,6 @@ static ssize_t eth_rx(VLANClientState *nc, const uint8_t *buf, size_t size)
 {
     struct xlx_ethlite *s = DO_UPCAST(NICState, nc, nc)->opaque;
     unsigned int rxbase = s->rxbuf * (0x800 / 4);
-    int i;
 
     /* DA filter.  */
     if (!(buf[0] & 0x80) && memcmp(&s->conf.macaddr.a[0], buf, 6))
@@ -185,12 +184,6 @@ static ssize_t eth_rx(VLANClientState *nc, const uint8_t *buf, size_t size)
 
     D(qemu_log("%s %d rxbase=%x\n", __func__, size, rxbase));
     memcpy(&s->regs[rxbase + R_RX_BUF0], buf, size);
-
-    /* Bring it into host endianess.  */
-    for (i = 0; i < ((size + 3) / 4); i++) {
-       uint32_t d = s->regs[rxbase + R_RX_BUF0 + i];
-       s->regs[rxbase + R_RX_BUF0 + i] = be32_to_cpu(d);
-    }
 
     s->regs[rxbase + R_RX_CTRL0] |= CTRL_S;
     if (s->regs[rxbase + R_RX_CTRL0] & CTRL_I)
@@ -219,13 +212,12 @@ static NetClientInfo net_xilinx_ethlite_info = {
 static int xilinx_ethlite_init(SysBusDevice *dev)
 {
     struct xlx_ethlite *s = FROM_SYSBUS(typeof (*s), dev);
-    int regs;
 
     sysbus_init_irq(dev, &s->irq);
     s->rxbuf = 0;
 
-    regs = cpu_register_io_memory(eth_read, eth_write, s, DEVICE_NATIVE_ENDIAN);
-    sysbus_init_mmio(dev, R_MAX * 4, regs);
+    memory_region_init_io(&s->mmio, &eth_ops, s, "xilinx-ethlite", R_MAX * 4);
+    sysbus_init_mmio_region(dev, &s->mmio);
 
     qemu_macaddr_default_if_unset(&s->conf.macaddr);
     s->nic = qemu_new_nic(&net_xilinx_ethlite_info, &s->conf,

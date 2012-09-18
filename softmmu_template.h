@@ -1,6 +1,11 @@
 /*
  *  Software MMU support
  *
+ * Generate helpers used by TCG for qemu_ld/st ops and code load
+ * functions.
+ *
+ * Included from target op helpers and exec.c.
+ *
  *  Copyright (c) 2003 Fabrice Bellard
  *
  * This library is free software; you can redistribute it and/or
@@ -131,17 +136,67 @@ DATA_TYPE REGPARM glue(glue(__ld, SUFFIX), MMUSUFFIX)(target_ulong addr,
         if ((addr & (DATA_SIZE - 1)) != 0)
             do_unaligned_access(addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
 #endif
-        tlb_fill(addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
+        tlb_fill(env, addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
         goto redo;
     }
     return res;
 }
 
-#if defined(CONFIG_TCG_TARGET_X86_OPT) && !defined(SOFTMMU_CODE_ACCESS)
-/*
- * extended versions of MMU helpers for x86 TCG target optimization
- * !defined(SOFTMMU_CODE_ACCESS) suppress warnings from exec.c
- */
+/* handle all unaligned cases */
+static DATA_TYPE glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(target_ulong addr,
+                                                        int mmu_idx,
+                                                        void *retaddr)
+{
+    DATA_TYPE res, res1, res2;
+    int index, shift;
+    target_phys_addr_t ioaddr;
+    unsigned long addend;
+    target_ulong tlb_addr, addr1, addr2;
+
+    index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
+ redo:
+    tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
+    if ((addr & TARGET_PAGE_MASK) == (tlb_addr & (TARGET_PAGE_MASK | TLB_INVALID_MASK))) {
+        if (tlb_addr & ~TARGET_PAGE_MASK) {
+            /* IO access */
+            if ((addr & (DATA_SIZE - 1)) != 0)
+                goto do_unaligned_access;
+            ioaddr = env->iotlb[mmu_idx][index];
+            res = glue(io_read, SUFFIX)(ioaddr, addr, retaddr);
+        } else if (((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1) >= TARGET_PAGE_SIZE) {
+        do_unaligned_access:
+            /* slow unaligned access (it spans two pages) */
+            addr1 = addr & ~(DATA_SIZE - 1);
+            addr2 = addr1 + DATA_SIZE;
+            res1 = glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(addr1,
+                                                          mmu_idx, retaddr);
+            res2 = glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(addr2,
+                                                          mmu_idx, retaddr);
+            shift = (addr & (DATA_SIZE - 1)) * 8;
+#ifdef TARGET_WORDS_BIGENDIAN
+            res = (res1 << shift) | (res2 >> ((DATA_SIZE * 8) - shift));
+#else
+            res = (res1 >> shift) | (res2 << ((DATA_SIZE * 8) - shift));
+#endif
+            res = (DATA_TYPE)res;
+        } else {
+            /* unaligned/aligned access in the same page */
+            addend = env->tlb_table[mmu_idx][index].addend;
+            res = glue(glue(ld, USUFFIX), _raw)((uint8_t *)(long)(addr+addend));
+        }
+    } else {
+        /* the page is not in the TLB : fill it */
+        tlb_fill(env, addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
+        goto redo;
+    }
+    return res;
+}
+
+#if defined(CONFIG_QEMU_LDST_OPTIMIZATION) && !defined(SOFTMMU_CODE_ACCESS)
+/* Extended versions of MMU helpers for qemu_ld IR optimization.
+   They get return address arguments because the caller PCs are not where helpers return to.
+   !defined(SOFTMMU_CODE_ACCESS) suppress warnings from exec.c */
+#if defined(__i386__) || defined(__x86_64__)
 DATA_TYPE REGPARM glue(glue(__ldext, SUFFIX), MMUSUFFIX)(target_ulong addr,
                                                          int mmu_idx,
                                                          void *ra)
@@ -193,62 +248,13 @@ DATA_TYPE REGPARM glue(glue(__ldext, SUFFIX), MMUSUFFIX)(target_ulong addr,
         if ((addr & (DATA_SIZE - 1)) != 0)
             do_unaligned_access(addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
 #endif
-        tlb_fill(addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
+        tlb_fill(env, addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
         goto redo;
     }
     return res;
 }
-#endif  /* CONFIG_TCG_TARGET_X86_OPT */
-
-/* handle all unaligned cases */
-static DATA_TYPE glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(target_ulong addr,
-                                                        int mmu_idx,
-                                                        void *retaddr)
-{
-    DATA_TYPE res, res1, res2;
-    int index, shift;
-    target_phys_addr_t ioaddr;
-    unsigned long addend;
-    target_ulong tlb_addr, addr1, addr2;
-
-    index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
- redo:
-    tlb_addr = env->tlb_table[mmu_idx][index].ADDR_READ;
-    if ((addr & TARGET_PAGE_MASK) == (tlb_addr & (TARGET_PAGE_MASK | TLB_INVALID_MASK))) {
-        if (tlb_addr & ~TARGET_PAGE_MASK) {
-            /* IO access */
-            if ((addr & (DATA_SIZE - 1)) != 0)
-                goto do_unaligned_access;
-            ioaddr = env->iotlb[mmu_idx][index];
-            res = glue(io_read, SUFFIX)(ioaddr, addr, retaddr);
-        } else if (((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1) >= TARGET_PAGE_SIZE) {
-        do_unaligned_access:
-            /* slow unaligned access (it spans two pages) */
-            addr1 = addr & ~(DATA_SIZE - 1);
-            addr2 = addr1 + DATA_SIZE;
-            res1 = glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(addr1,
-                                                          mmu_idx, retaddr);
-            res2 = glue(glue(slow_ld, SUFFIX), MMUSUFFIX)(addr2,
-                                                          mmu_idx, retaddr);
-            shift = (addr & (DATA_SIZE - 1)) * 8;
-#ifdef TARGET_WORDS_BIGENDIAN
-            res = (res1 << shift) | (res2 >> ((DATA_SIZE * 8) - shift));
-#else
-            res = (res1 >> shift) | (res2 << ((DATA_SIZE * 8) - shift));
-#endif
-            res = (DATA_TYPE)res;
-        } else {
-            /* unaligned/aligned access in the same page */
-            addend = env->tlb_table[mmu_idx][index].addend;
-            res = glue(glue(ld, USUFFIX), _raw)((uint8_t *)(long)(addr+addend));
-        }
-    } else {
-        /* the page is not in the TLB : fill it */
-        tlb_fill(addr, READ_ACCESS_TYPE, mmu_idx, retaddr);
-        goto redo;
-    }
-    return res;
-}
+#endif  /* defined(__i386__) || defined(__x86_64__) */
+#endif  /* defined(CONFIG_QEMU_LDST_OPTIMIZATION) */
 
 #ifndef SOFTMMU_CODE_ACCESS
 
@@ -332,16 +338,62 @@ void REGPARM glue(glue(__st, SUFFIX), MMUSUFFIX)(target_ulong addr,
         if ((addr & (DATA_SIZE - 1)) != 0)
             do_unaligned_access(addr, 1, mmu_idx, retaddr);
 #endif
-        tlb_fill(addr, 1, mmu_idx, retaddr);
+        tlb_fill(env, addr, 1, mmu_idx, retaddr);
         goto redo;
     }
 }
 
-#if defined(CONFIG_TCG_TARGET_X86_OPT)
-/*
- * extended versions of MMU helpers for x86 TCG target optimization
- * !defined(SOFTMMU_CODE_ACCESS) suppress warnings from exec.c
- */
+/* handles all unaligned cases */
+static void glue(glue(slow_st, SUFFIX), MMUSUFFIX)(target_ulong addr,
+                                                   DATA_TYPE val,
+                                                   int mmu_idx,
+                                                   void *retaddr)
+{
+    target_phys_addr_t ioaddr;
+    unsigned long addend;
+    target_ulong tlb_addr;
+    int index, i;
+
+    index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
+ redo:
+    tlb_addr = env->tlb_table[mmu_idx][index].addr_write;
+    if ((addr & TARGET_PAGE_MASK) == (tlb_addr & (TARGET_PAGE_MASK | TLB_INVALID_MASK))) {
+        if (tlb_addr & ~TARGET_PAGE_MASK) {
+            /* IO access */
+            if ((addr & (DATA_SIZE - 1)) != 0)
+                goto do_unaligned_access;
+            ioaddr = env->iotlb[mmu_idx][index];
+            glue(io_write, SUFFIX)(ioaddr, val, addr, retaddr);
+        } else if (((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1) >= TARGET_PAGE_SIZE) {
+        do_unaligned_access:
+            /* XXX: not efficient, but simple */
+            /* Note: relies on the fact that tlb_fill() does not remove the
+             * previous page from the TLB cache.  */
+            for(i = DATA_SIZE - 1; i >= 0; i--) {
+#ifdef TARGET_WORDS_BIGENDIAN
+                glue(slow_stb, MMUSUFFIX)(addr + i, val >> (((DATA_SIZE - 1) * 8) - (i * 8)),
+                                          mmu_idx, retaddr);
+#else
+                glue(slow_stb, MMUSUFFIX)(addr + i, val >> (i * 8),
+                                          mmu_idx, retaddr);
+#endif
+            }
+        } else {
+            /* aligned/unaligned access in the same page */
+            addend = env->tlb_table[mmu_idx][index].addend;
+            glue(glue(st, SUFFIX), _raw)((uint8_t *)(long)(addr+addend), val);
+        }
+    } else {
+        /* the page is not in the TLB : fill it */
+        tlb_fill(env, addr, 1, mmu_idx, retaddr);
+        goto redo;
+    }
+}
+
+#if defined(CONFIG_QEMU_LDST_OPTIMIZATION)
+#if defined(__i386__) || defined(__x86_64__)
+/* Extended versions of MMU helpers for qemu_st IR optimization.
+   They get return address arguments because the caller PCs are not where helpers return to. */
 void REGPARM glue(glue(__stext, SUFFIX), MMUSUFFIX)(target_ulong addr,
                                                     DATA_TYPE val,
                                                     int mmu_idx,
@@ -390,58 +442,12 @@ void REGPARM glue(glue(__stext, SUFFIX), MMUSUFFIX)(target_ulong addr,
         if ((addr & (DATA_SIZE - 1)) != 0)
             do_unaligned_access(addr, 1, mmu_idx, retaddr);
 #endif
-        tlb_fill(addr, 1, mmu_idx, retaddr);
+        tlb_fill(env, addr, 1, mmu_idx, retaddr);
         goto redo;
     }
 }
-#endif  /* CONFIG_TCG_TARGET_X86_OPT */
-
-/* handles all unaligned cases */
-static void glue(glue(slow_st, SUFFIX), MMUSUFFIX)(target_ulong addr,
-                                                   DATA_TYPE val,
-                                                   int mmu_idx,
-                                                   void *retaddr)
-{
-    target_phys_addr_t ioaddr;
-    unsigned long addend;
-    target_ulong tlb_addr;
-    int index, i;
-
-    index = (addr >> TARGET_PAGE_BITS) & (CPU_TLB_SIZE - 1);
- redo:
-    tlb_addr = env->tlb_table[mmu_idx][index].addr_write;
-    if ((addr & TARGET_PAGE_MASK) == (tlb_addr & (TARGET_PAGE_MASK | TLB_INVALID_MASK))) {
-        if (tlb_addr & ~TARGET_PAGE_MASK) {
-            /* IO access */
-            if ((addr & (DATA_SIZE - 1)) != 0)
-                goto do_unaligned_access;
-            ioaddr = env->iotlb[mmu_idx][index];
-            glue(io_write, SUFFIX)(ioaddr, val, addr, retaddr);
-        } else if (((addr & ~TARGET_PAGE_MASK) + DATA_SIZE - 1) >= TARGET_PAGE_SIZE) {
-        do_unaligned_access:
-            /* XXX: not efficient, but simple */
-            /* Note: relies on the fact that tlb_fill() does not remove the
-             * previous page from the TLB cache.  */
-            for(i = DATA_SIZE - 1; i >= 0; i--) {
-#ifdef TARGET_WORDS_BIGENDIAN
-                glue(slow_stb, MMUSUFFIX)(addr + i, val >> (((DATA_SIZE - 1) * 8) - (i * 8)),
-                                          mmu_idx, retaddr);
-#else
-                glue(slow_stb, MMUSUFFIX)(addr + i, val >> (i * 8),
-                                          mmu_idx, retaddr);
-#endif
-            }
-        } else {
-            /* aligned/unaligned access in the same page */
-            addend = env->tlb_table[mmu_idx][index].addend;
-            glue(glue(st, SUFFIX), _raw)((uint8_t *)(long)(addr+addend), val);
-        }
-    } else {
-        /* the page is not in the TLB : fill it */
-        tlb_fill(addr, 1, mmu_idx, retaddr);
-        goto redo;
-    }
-}
+#endif  /* defined(__i386__) || defined(__x86_64__) */
+#endif  /* defined(CONFIG_QEMU_LDST_OPTIMIZATION) */
 
 #endif /* !defined(SOFTMMU_CODE_ACCESS) */
 

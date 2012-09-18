@@ -41,6 +41,8 @@
 typedef struct GrackleState {
     SysBusDevice busdev;
     PCIHostState host_state;
+    MemoryRegion pci_mmio;
+    MemoryRegion pci_hole;
 } GrackleState;
 
 /* Don't know if this matches real hardware, but it agrees with OHW.  */
@@ -57,28 +59,13 @@ static void pci_grackle_set_irq(void *opaque, int irq_num, int level)
     qemu_set_irq(pic[irq_num + 0x15], level);
 }
 
-static void pci_grackle_save(QEMUFile* f, void *opaque)
-{
-    PCIDevice *d = opaque;
-
-    pci_device_save(d, f);
-}
-
-static int pci_grackle_load(QEMUFile* f, void *opaque, int version_id)
-{
-    PCIDevice *d = opaque;
-
-    if (version_id != 1)
-        return -EINVAL;
-
-    return pci_device_load(d, f);
-}
-
 static void pci_grackle_reset(void *opaque)
 {
 }
 
-PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic)
+PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic,
+                         MemoryRegion *address_space_mem,
+                         MemoryRegion *address_space_io)
 {
     DeviceState *dev;
     SysBusDevice *s;
@@ -88,10 +75,20 @@ PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic)
     qdev_init_nofail(dev);
     s = sysbus_from_qdev(dev);
     d = FROM_SYSBUS(GrackleState, s);
+
+    memory_region_init(&d->pci_mmio, "pci-mmio", 0x100000000ULL);
+    memory_region_init_alias(&d->pci_hole, "pci-hole", &d->pci_mmio,
+                             0x80000000ULL, 0x7e000000ULL);
+    memory_region_add_subregion(address_space_mem, 0x80000000ULL,
+                                &d->pci_hole);
+
     d->host_state.bus = pci_register_bus(&d->busdev.qdev, "pci",
                                          pci_grackle_set_irq,
                                          pci_grackle_map_irq,
-                                         pic, 0, 4);
+                                         pic,
+                                         &d->pci_mmio,
+                                         address_space_io,
+                                         0, 4);
 
     pci_create_simple(d->host_state.bus, 0, "grackle");
 
@@ -104,30 +101,23 @@ PCIBus *pci_grackle_init(uint32_t base, qemu_irq *pic)
 static int pci_grackle_init_device(SysBusDevice *dev)
 {
     GrackleState *s;
-    int pci_mem_config, pci_mem_data;
 
     s = FROM_SYSBUS(GrackleState, dev);
 
-    pci_mem_config = pci_host_conf_register_mmio(&s->host_state,
-                                                 DEVICE_LITTLE_ENDIAN);
-    pci_mem_data = pci_host_data_register_mmio(&s->host_state,
-                                               DEVICE_LITTLE_ENDIAN);
-    sysbus_init_mmio(dev, 0x1000, pci_mem_config);
-    sysbus_init_mmio(dev, 0x1000, pci_mem_data);
+    memory_region_init_io(&s->host_state.conf_mem, &pci_host_conf_le_ops,
+                          &s->host_state, "pci-conf-idx", 0x1000);
+    memory_region_init_io(&s->host_state.data_mem, &pci_host_data_le_ops,
+                          &s->host_state, "pci-data-idx", 0x1000);
+    sysbus_init_mmio_region(dev, &s->host_state.conf_mem);
+    sysbus_init_mmio_region(dev, &s->host_state.data_mem);
 
-    register_savevm(&dev->qdev, "grackle", 0, 1, pci_grackle_save,
-                    pci_grackle_load, &s->host_state);
     qemu_register_reset(pci_grackle_reset, &s->host_state);
     return 0;
 }
 
 static int grackle_pci_host_init(PCIDevice *d)
 {
-    pci_config_set_vendor_id(d->config, PCI_VENDOR_ID_MOTOROLA);
-    pci_config_set_device_id(d->config, PCI_DEVICE_ID_MOTOROLA_MPC106);
-    d->config[0x08] = 0x00; // revision
     d->config[0x09] = 0x01;
-    pci_config_set_class(d->config, PCI_CLASS_BRIDGE_HOST);
     return 0;
 }
 
@@ -135,6 +125,10 @@ static PCIDeviceInfo grackle_pci_host_info = {
     .qdev.name = "grackle",
     .qdev.size = sizeof(PCIDevice),
     .init      = grackle_pci_host_init,
+    .vendor_id = PCI_VENDOR_ID_MOTOROLA,
+    .device_id = PCI_DEVICE_ID_MOTOROLA_MPC106,
+    .revision  = 0x00,
+    .class_id  = PCI_CLASS_BRIDGE_HOST,
 };
 
 static void grackle_register_devices(void)

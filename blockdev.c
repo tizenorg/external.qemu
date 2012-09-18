@@ -14,7 +14,6 @@
 #include "qemu-option.h"
 #include "qemu-config.h"
 #include "sysemu.h"
-#include "hw/qdev.h"
 #include "block_int.h"
 
 static QTAILQ_HEAD(drivelist, DriveInfo) drives = QTAILQ_HEAD_INITIALIZER(drives);
@@ -182,9 +181,9 @@ static void drive_uninit(DriveInfo *dinfo)
 {
     qemu_opts_del(dinfo->opts);
     bdrv_delete(dinfo->bdrv);
-    qemu_free(dinfo->id);
+    g_free(dinfo->id);
     QTAILQ_REMOVE(&drives, dinfo, next);
-    qemu_free(dinfo);
+    g_free(dinfo);
 }
 
 void drive_put_ref(DriveInfo *dinfo)
@@ -217,6 +216,11 @@ static int parse_block_error_action(const char *buf, int is_read)
     }
 }
 
+#ifdef CONFIG_MARU
+extern int start_simple_client(char* msg);
+extern char* maru_convert_path(char* msg, const char *path);
+#endif
+
 DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 {
     const char *buf;
@@ -240,14 +244,6 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
     int ret;
 
     translation = BIOS_ATA_TRANSLATION_AUTO;
-
-    if (default_to_scsi) {
-        type = IF_SCSI;
-        pstrcpy(devname, sizeof(devname), "scsi");
-    } else {
-        type = IF_IDE;
-        pstrcpy(devname, sizeof(devname), "ide");
-    }
     media = MEDIA_DISK;
 
     /* extract parameters */
@@ -273,7 +269,11 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
             error_report("unsupported bus type '%s'", buf);
             return NULL;
 	}
+    } else {
+        type = default_to_scsi ? IF_SCSI : IF_IDE;
+        pstrcpy(devname, sizeof(devname), if_name[type]);
     }
+
     max_devs = if_max_devs[type];
 
     if (cyls || heads || secs) {
@@ -293,7 +293,7 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 
     if ((buf = qemu_opt_get(opts, "trans")) != NULL) {
         if (!cyls) {
-            error_report("'%s' trans must be used with cyls,heads and secs",
+            error_report("'%s' trans must be used with cyls, heads and secs",
                          buf);
             return NULL;
         }
@@ -314,7 +314,7 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 	    media = MEDIA_DISK;
 	} else if (!strcmp(buf, "cdrom")) {
             if (cyls || secs || heads) {
-                error_report("'%s' invalid physical CHS format", buf);
+                error_report("CHS can't be set with media=%s", buf);
 	        return NULL;
             }
 	    media = MEDIA_CDROM;
@@ -325,18 +325,9 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
     }
 
     if ((buf = qemu_opt_get(opts, "cache")) != NULL) {
-        if (!strcmp(buf, "off") || !strcmp(buf, "none")) {
-            bdrv_flags |= BDRV_O_NOCACHE;
-        } else if (!strcmp(buf, "writeback")) {
-            bdrv_flags |= BDRV_O_CACHE_WB;
-        } else if (!strcmp(buf, "unsafe")) {
-            bdrv_flags |= BDRV_O_CACHE_WB;
-            bdrv_flags |= BDRV_O_NO_FLUSH;
-        } else if (!strcmp(buf, "writethrough")) {
-            /* this is the default */
-        } else {
-           error_report("invalid cache option");
-           return NULL;
+        if (bdrv_parse_cache_flags(buf, &bdrv_flags) != 0) {
+            error_report("invalid cache option");
+            return NULL;
         }
     }
 
@@ -446,12 +437,12 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 
     /* init */
 
-    dinfo = qemu_mallocz(sizeof(*dinfo));
+    dinfo = g_malloc0(sizeof(*dinfo));
     if ((buf = qemu_opts_id(opts)) != NULL) {
-        dinfo->id = qemu_strdup(buf);
+        dinfo->id = g_strdup(buf);
     } else {
         /* no id supplied -> create one */
-        dinfo->id = qemu_mallocz(32);
+        dinfo->id = g_malloc0(32);
         if (type == IF_IDE || type == IF_SCSI)
             mediastr = (media == MEDIA_CDROM) ? "-cd" : "-hd";
         if (max_devs)
@@ -487,23 +478,19 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
             }
 	    break;
 	case MEDIA_CDROM:
-            bdrv_set_type_hint(dinfo->bdrv, BDRV_TYPE_CDROM);
+            dinfo->media_cd = 1;
 	    break;
 	}
         break;
     case IF_SD:
-        /* FIXME: This isn't really a floppy, but it's a reasonable
-           approximation.  */
     case IF_FLOPPY:
-        bdrv_set_type_hint(dinfo->bdrv, BDRV_TYPE_FLOPPY);
-        break;
     case IF_PFLASH:
     case IF_MTD:
         break;
     case IF_VIRTIO:
         /* add virtio block device */
         opts = qemu_opts_create(qemu_find_opts("device"), NULL, 0);
-        qemu_opt_set(opts, "driver", "virtio-blk-pci");
+        qemu_opt_set(opts, "driver", "virtio-blk");
         qemu_opt_set(opts, "drive", dinfo->id);
         if (devaddr)
             qemu_opt_set(opts, "addr", devaddr);
@@ -536,6 +523,17 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
     if (ret < 0) {
         error_report("could not open disk image %s: %s",
                      file, strerror(-ret));
+
+#ifdef CONFIG_MARU
+        const char _msg[] = "Failed to load disk file from the following path. Check if the file is corrupted or missing.\n\n";
+	    char* err_msg = NULL;
+        err_msg = maru_convert_path((char*)_msg, file);
+        start_simple_client(err_msg);
+        if (err_msg) {
+            g_free(err_msg);
+        }
+#endif
+
         goto err;
     }
 
@@ -545,9 +543,9 @@ DriveInfo *drive_init(QemuOpts *opts, int default_to_scsi)
 
 err:
     bdrv_delete(dinfo->bdrv);
-    qemu_free(dinfo->id);
+    g_free(dinfo->id);
     QTAILQ_REMOVE(&drives, dinfo, next);
-    qemu_free(dinfo);
+    g_free(dinfo);
     return NULL;
 }
 
@@ -571,15 +569,16 @@ void do_commit(Monitor *mon, const QDict *qdict)
 int do_snapshot_blkdev(Monitor *mon, const QDict *qdict, QObject **ret_data)
 {
     const char *device = qdict_get_str(qdict, "device");
-    const char *filename = qdict_get_try_str(qdict, "snapshot_file");
+    const char *filename = qdict_get_try_str(qdict, "snapshot-file");
     const char *format = qdict_get_try_str(qdict, "format");
     BlockDriverState *bs;
-    BlockDriver *drv, *proto_drv;
+    BlockDriver *drv, *old_drv, *proto_drv;
     int ret = 0;
     int flags;
+    char old_filename[1024];
 
     if (!filename) {
-        qerror_report(QERR_MISSING_PARAMETER, "snapshot_file");
+        qerror_report(QERR_MISSING_PARAMETER, "snapshot-file");
         ret = -1;
         goto out;
     }
@@ -590,6 +589,11 @@ int do_snapshot_blkdev(Monitor *mon, const QDict *qdict, QObject **ret_data)
         ret = -1;
         goto out;
     }
+
+    pstrcpy(old_filename, sizeof(old_filename), bs->filename);
+
+    old_drv = bs->drv;
+    flags = bs->open_flags;
 
     if (!format) {
         format = "qcow2";
@@ -610,7 +614,7 @@ int do_snapshot_blkdev(Monitor *mon, const QDict *qdict, QObject **ret_data)
     }
 
     ret = bdrv_img_create(filename, format, bs->filename,
-                          bs->drv->format_name, NULL, -1, bs->open_flags);
+                          bs->drv->format_name, NULL, -1, flags);
     if (ret) {
         goto out;
     }
@@ -618,15 +622,20 @@ int do_snapshot_blkdev(Monitor *mon, const QDict *qdict, QObject **ret_data)
     qemu_aio_flush();
     bdrv_flush(bs);
 
-    flags = bs->open_flags;
     bdrv_close(bs);
     ret = bdrv_open(bs, filename, flags, drv);
     /*
-     * If reopening the image file we just created fails, we really
-     * are in trouble :(
+     * If reopening the image file we just created fails, fall back
+     * and try to re-open the original image. If that fails too, we
+     * are in serious trouble.
      */
     if (ret != 0) {
-        abort();
+        ret = bdrv_open(bs, old_filename, flags, old_drv);
+        if (ret != 0) {
+            qerror_report(QERR_OPEN_FILE_FAILED, old_filename);
+        } else {
+            qerror_report(QERR_OPEN_FILE_FAILED, filename);
+        }
     }
 out:
     if (ret) {
@@ -638,13 +647,13 @@ out:
 
 static int eject_device(Monitor *mon, BlockDriverState *bs, int force)
 {
-    if (!force) {
-        if (!bdrv_is_removable(bs)) {
-            qerror_report(QERR_DEVICE_NOT_REMOVABLE,
-                           bdrv_get_device_name(bs));
-            return -1;
-        }
-        if (bdrv_is_locked(bs)) {
+    if (!bdrv_dev_has_removable_media(bs)) {
+        qerror_report(QERR_DEVICE_NOT_REMOVABLE, bdrv_get_device_name(bs));
+        return -1;
+    }
+    if (bdrv_dev_is_medium_locked(bs) && !bdrv_dev_is_tray_open(bs)) {
+        bdrv_dev_eject_request(bs, force);
+        if (!force) {
             qerror_report(QERR_DEVICE_LOCKED, bdrv_get_device_name(bs));
             return -1;
         }
@@ -742,12 +751,12 @@ int do_drive_del(Monitor *mon, const QDict *qdict, QObject **ret_data)
     bdrv_flush(bs);
     bdrv_close(bs);
 
-    /* if we have a device associated with this BlockDriverState (bs->peer)
+    /* if we have a device attached to this BlockDriverState
      * then we need to make the drive anonymous until the device
      * can be removed.  If this is a drive with no device backing
      * then we can just get rid of the block driver state right here.
      */
-    if (bs->peer) {
+    if (bdrv_get_attached_dev(bs)) {
         bdrv_make_anon(bs);
     } else {
         drive_uninit(drive_get_by_blockdev(bs));

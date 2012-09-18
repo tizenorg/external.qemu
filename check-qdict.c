@@ -56,9 +56,9 @@ START_TEST(qdict_put_obj_test)
 
     // destroy doesn't exit yet
     QDECREF(qi);
-    qemu_free(ent->key);
-    qemu_free(ent);
-    qemu_free(qdict);
+    g_free(ent->key);
+    g_free(ent);
+    g_free(qdict);
 }
 END_TEST
 
@@ -267,8 +267,9 @@ static QString *read_line(FILE *file, char *key)
 {
     char value[128];
 
-    if (fscanf(file, "%s%s", key, value) == EOF)
+    if (fscanf(file, "%127s%127s", key, value) == EOF) {
         return NULL;
+    }
     remove_dots(key);
     return qstring_from_str(value);
 }

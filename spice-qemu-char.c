@@ -36,17 +36,16 @@ static int vmc_write(SpiceCharDeviceInstance *sin, const uint8_t *buf, int len)
 
     while (len > 0) {
         last_out = MIN(len, VMC_MAX_HOST_WRITE);
-        qemu_chr_read(scd->chr, p, last_out);
-        if (last_out > 0) {
-            out += last_out;
-            len -= last_out;
-            p += last_out;
-        } else {
+        if (qemu_chr_be_can_write(scd->chr) < last_out) {
             break;
         }
+        qemu_chr_be_write(scd->chr, p, last_out);
+        out += last_out;
+        len -= last_out;
+        p += last_out;
     }
 
-    dprintf(scd, 3, "%s: %lu/%zd\n", __func__, out, len + out);
+    dprintf(scd, 3, "%s: %zu/%zd\n", __func__, out, len + out);
     trace_spice_vmc_write(out, len + out);
     return out;
 }
@@ -70,11 +69,40 @@ static int vmc_read(SpiceCharDeviceInstance *sin, uint8_t *buf, int len)
     return bytes;
 }
 
+static void vmc_state(SpiceCharDeviceInstance *sin, int connected)
+{
+    SpiceCharDriver *scd = container_of(sin, SpiceCharDriver, sin);
+
+#if SPICE_SERVER_VERSION < 0x000901
+    /*
+     * spice-server calls the state callback for the agent channel when the
+     * spice client connects / disconnects. Given that not the client but
+     * the server is doing the parsing of the messages this is wrong as the
+     * server is still listening. Worse, this causes the parser in the server
+     * to go out of sync, so we ignore state calls for subtype vdagent
+     * spicevmc chardevs. For the full story see:
+     * http://lists.freedesktop.org/archives/spice-devel/2011-July/004837.html
+     */
+    if (strcmp(sin->subtype, "vdagent") == 0) {
+        return;
+    }
+#endif
+
+    if ((scd->chr->opened && connected) ||
+        (!scd->chr->opened && !connected)) {
+        return;
+    }
+
+    qemu_chr_be_event(scd->chr,
+                      connected ? CHR_EVENT_OPENED : CHR_EVENT_CLOSED);
+}
+
 static SpiceCharDeviceInterface vmc_interface = {
     .base.type          = SPICE_INTERFACE_CHAR_DEVICE,
     .base.description   = "spice virtual channel char device",
     .base.major_version = SPICE_INTERFACE_CHAR_DEVICE_MAJOR,
     .base.minor_version = SPICE_INTERFACE_CHAR_DEVICE_MINOR,
+    .state              = vmc_state,
     .write              = vmc_write,
     .read               = vmc_read,
 };
@@ -113,7 +141,7 @@ static int spice_chr_write(CharDriverState *chr, const uint8_t *buf, int len)
     assert(s->datalen == 0);
     if (s->bufsize < len) {
         s->bufsize = len;
-        s->buffer = qemu_realloc(s->buffer, s->bufsize);
+        s->buffer = g_realloc(s->buffer, s->bufsize);
     }
     memcpy(s->buffer, buf, len);
     s->datapos = s->buffer;
@@ -128,7 +156,19 @@ static void spice_chr_close(struct CharDriverState *chr)
 
     printf("%s\n", __func__);
     vmc_unregister_interface(s);
-    qemu_free(s);
+    g_free(s);
+}
+
+static void spice_chr_guest_open(struct CharDriverState *chr)
+{
+    SpiceCharDriver *s = chr->opaque;
+    vmc_register_interface(s);
+}
+
+static void spice_chr_guest_close(struct CharDriverState *chr)
+{
+    SpiceCharDriver *s = chr->opaque;
+    vmc_unregister_interface(s);
 }
 
 static void print_allowed_subtypes(void)
@@ -148,7 +188,7 @@ static void print_allowed_subtypes(void)
     fprintf(stderr, "\n");
 }
 
-CharDriverState *qemu_chr_open_spice(QemuOpts *opts)
+int qemu_chr_open_spice(QemuOpts *opts, CharDriverState **_chr)
 {
     CharDriverState *chr;
     SpiceCharDriver *s;
@@ -160,7 +200,7 @@ CharDriverState *qemu_chr_open_spice(QemuOpts *opts)
     if (name == NULL) {
         fprintf(stderr, "spice-qemu-char: missing name parameter\n");
         print_allowed_subtypes();
-        return NULL;
+        return -EINVAL;
     }
     for(;*psubtype != NULL; ++psubtype) {
         if (strcmp(name, *psubtype) == 0) {
@@ -171,11 +211,11 @@ CharDriverState *qemu_chr_open_spice(QemuOpts *opts)
     if (subtype == NULL) {
         fprintf(stderr, "spice-qemu-char: unsupported name\n");
         print_allowed_subtypes();
-        return NULL;
+        return -EINVAL;
     }
 
-    chr = qemu_mallocz(sizeof(CharDriverState));
-    s = qemu_mallocz(sizeof(SpiceCharDriver));
+    chr = g_malloc0(sizeof(CharDriverState));
+    s = g_malloc0(sizeof(SpiceCharDriver));
     s->chr = chr;
     s->debug = debug;
     s->active = false;
@@ -183,8 +223,16 @@ CharDriverState *qemu_chr_open_spice(QemuOpts *opts)
     chr->opaque = s;
     chr->chr_write = spice_chr_write;
     chr->chr_close = spice_chr_close;
+    chr->chr_guest_open = spice_chr_guest_open;
+    chr->chr_guest_close = spice_chr_guest_close;
 
-    qemu_chr_generic_open(chr);
+#if SPICE_SERVER_VERSION < 0x000901
+    /* See comment in vmc_state() */
+    if (strcmp(subtype, "vdagent") == 0) {
+        qemu_chr_generic_open(chr);
+    }
+#endif
 
-    return chr;
+    *_chr = chr;
+    return 0;
 }

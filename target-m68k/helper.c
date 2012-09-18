@@ -23,7 +23,6 @@
 
 #include "config.h"
 #include "cpu.h"
-#include "exec-all.h"
 #include "qemu-common.h"
 #include "gdbstub.h"
 
@@ -173,7 +172,7 @@ CPUM68KState *cpu_m68k_init(const char *cpu_model)
     CPUM68KState *env;
     static int inited;
 
-    env = qemu_mallocz(sizeof(CPUM68KState));
+    env = g_malloc0(sizeof(CPUM68KState));
     cpu_exec_init(env);
     if (!inited) {
         inited = 1;
@@ -194,7 +193,7 @@ CPUM68KState *cpu_m68k_init(const char *cpu_model)
 
 void cpu_m68k_close(CPUM68KState *env)
 {
-    qemu_free(env);
+    g_free(env);
 }
 
 void cpu_m68k_flush_flags(CPUM68KState *env, int cc_op)
@@ -345,7 +344,7 @@ void m68k_switch_sp(CPUM68KState *env)
 #if defined(CONFIG_USER_ONLY)
 
 int cpu_m68k_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                               int mmu_idx, int is_softmmu)
+                               int mmu_idx)
 {
     env->exception_index = EXCP_ACCESS;
     env->mmu.ar = address;
@@ -363,7 +362,7 @@ target_phys_addr_t cpu_get_phys_page_debug(CPUState *env, target_ulong addr)
 }
 
 int cpu_m68k_handle_mmu_fault (CPUState *env, target_ulong address, int rw,
-                               int mmu_idx, int is_softmmu)
+                               int mmu_idx)
 {
     int prot;
 
@@ -714,7 +713,7 @@ void HELPER(macsats)(CPUState *env, uint32_t acc)
     if (env->macsr & MACSR_V) {
         env->macsr |= MACSR_PAV0 << acc;
         if (env->macsr & MACSR_OMC) {
-            /* The result is saturated to 32 bits, despite overflow occuring
+            /* The result is saturated to 32 bits, despite overflow occurring
                at 48 bits.  Seems weird, but that's what the hardware docs
                say.  */
             result = (result >> 63) ^ 0x7fffffff;

@@ -463,9 +463,9 @@ static int lm8323_init(i2c_slave *i2c)
     LM823KbdState *s = FROM_I2C_SLAVE(LM823KbdState, i2c);
 
     s->model = 0x8323;
-    s->pwm.tm[0] = qemu_new_timer(vm_clock, lm_kbd_pwm0_tick, s);
-    s->pwm.tm[1] = qemu_new_timer(vm_clock, lm_kbd_pwm1_tick, s);
-    s->pwm.tm[2] = qemu_new_timer(vm_clock, lm_kbd_pwm2_tick, s);
+    s->pwm.tm[0] = qemu_new_timer_ns(vm_clock, lm_kbd_pwm0_tick, s);
+    s->pwm.tm[1] = qemu_new_timer_ns(vm_clock, lm_kbd_pwm1_tick, s);
+    s->pwm.tm[2] = qemu_new_timer_ns(vm_clock, lm_kbd_pwm2_tick, s);
     qdev_init_gpio_out(&i2c->qdev, &s->nirq, 1);
 
     lm_kbd_reset(s);
@@ -474,9 +474,9 @@ static int lm8323_init(i2c_slave *i2c)
     return 0;
 }
 
-void lm832x_key_event(struct i2c_slave *i2c, int key, int state)
+void lm832x_key_event(DeviceState *dev, int key, int state)
 {
-    LM823KbdState *s = (LM823KbdState *) i2c;
+    LM823KbdState *s = FROM_I2C_SLAVE(LM823KbdState, I2C_SLAVE_FROM_QDEV(dev));
 
     if ((s->status & INT_ERROR) && (s->error & ERR_FIFOOVR))
         return;

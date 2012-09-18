@@ -72,7 +72,8 @@ static unsigned int qed_check_l2_table(QEDCheck *check, QEDTable *table)
     for (i = 0; i < s->table_nelems; i++) {
         uint64_t offset = table->offsets[i];
 
-        if (!offset) {
+        if (qed_offset_is_unalloc_cluster(offset) ||
+            qed_offset_is_zero_cluster(offset)) {
             continue;
         }
 
@@ -111,7 +112,7 @@ static int qed_check_l1_table(QEDCheck *check, QEDTable *table)
         unsigned int num_invalid_l2;
         uint64_t offset = table->offsets[i];
 
-        if (!offset) {
+        if (qed_offset_is_unalloc_cluster(offset)) {
             continue;
         }
 
@@ -196,7 +197,7 @@ int qed_check(BDRVQEDState *s, BdrvCheckResult *result, bool fix)
     };
     int ret;
 
-    check.used_clusters = qemu_mallocz(((check.nclusters + 31) / 32) *
+    check.used_clusters = g_malloc0(((check.nclusters + 31) / 32) *
                                        sizeof(check.used_clusters[0]));
 
     ret = qed_check_l1_table(&check, s->l1_table);
@@ -205,6 +206,6 @@ int qed_check(BDRVQEDState *s, BdrvCheckResult *result, bool fix)
         qed_check_for_leaks(&check);
     }
 
-    qemu_free(check.used_clusters);
+    g_free(check.used_clusters);
     return ret;
 }

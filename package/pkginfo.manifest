@@ -1,17 +1,31 @@
-Package: emulator
-Version: 1.2.22
-OS: linux
-Build-host-os: linux
+Version: 1.3.53
 Maintainer: Yeong-Kyoon Lee<yeongkyoon.lee@samsung.com>
-Install-dependency: emulator-kernel [ linux ]
 Source: emulator
+
+Package: emulator-qemu-x86
+OS: ubuntu-32
+Build-host-os: ubuntu-32
+Build-dependency: emulator-lib [ ubuntu-32 ]
+Install-dependency: emulator-kernel-x86 [ ubuntu-32 ], vgabios [ ubuntu-32 ]
 Description: Tizen Emulator
 
-Package: emulator
-Version: 1.2.22
-OS: windows
-Build-host-os: windows
-Maintainer: Yeong-Kyoon Lee<yeongkyoon.lee@samsung.com>
-Install-dependency: emulator-kernel [ windows ],emulator-dll [ windows ]
-Source: emulator
+Package: emulator-qemu-x86
+OS: ubuntu-64
+Build-host-os: ubuntu-64
+Build-dependency: emulator-lib [ ubuntu-64 ]
+Install-dependency: emulator-kernel-x86 [ ubuntu-64 ], vgabios [ ubuntu-64 ]
+Description: Tizen Emulator
+
+Package: emulator-qemu-x86
+OS: windows-32, windows-64
+Build-host-os: windows-32
+Build-dependency: SDL-1.2.14 [ windows-32 ], apache-ant-1.8.3-bin [ windows-32 ], gtk-bundle_2.16.6 [ windows-32 ], directx-dev [ windows-32 ], libcurl-4 [ windows-32 ], emulator-lib [ windows-32 ] 
+Install-dependency: emulator-kernel-x86 [ windows-32 ], vgabios [ windows-32 ]
+Description: Tizen Emulator
+
+Package: emulator-qemu-x86
+OS: macos-64
+Build-host-os: macos-64
+Build-dependency: emulator-lib [ macos-64 ]
+Install-dependency: emulator-kernel-x86 [ macos-64 ], vgabios [ macos-64 ]
 Description: Tizen Emulator

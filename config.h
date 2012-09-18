@@ -1,2 +1,2 @@
 #include "config-host.h"
-#include "config-target.h"
+#include "i386-softmmu/config-target.h"

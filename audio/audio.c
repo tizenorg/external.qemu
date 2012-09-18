@@ -39,6 +39,11 @@
 #define SW_NAME(sw) (sw)->name ? (sw)->name : "unknown"
 
 
+#ifdef CONFIG_MARU
+#include "../tizen/src/debug_ch.h"
+MULTI_DEBUG_CHANNEL(tizen, qemu_audio);
+#endif
+
 /* Order of CONFIG_AUDIO_DRIVERS is import.
    The 1st one is the one used by default, that is the reason
     that we generate the list.
@@ -196,7 +201,7 @@ void *audio_calloc (const char *funcname, int nmemb, size_t size)
         return NULL;
     }
 
-    return qemu_mallocz (len);
+    return g_malloc0 (len);
 }
 
 static char *audio_alloc_prefix (const char *s)
@@ -210,7 +215,7 @@ static char *audio_alloc_prefix (const char *s)
     }
 
     len = strlen (s);
-    r = qemu_malloc (len + sizeof (qemu_prefix));
+    r = g_malloc (len + sizeof (qemu_prefix));
 
     u = r + sizeof (qemu_prefix) - 1;
 
@@ -339,11 +344,15 @@ void AUD_vlog (const char *cap, const char *fmt, va_list ap)
         monitor_vprintf(default_mon, fmt, ap);
     }
     else {
+#ifdef CONFIG_MARU
+        TRACE(fmt, ap);
+#else
         if (cap) {
             fprintf (stderr, "%s: ", cap);
         }
 
         vfprintf (stderr, fmt, ap);
+#endif
     }
 }
 
@@ -425,7 +434,7 @@ static void audio_print_options (const char *prefix,
         printf ("    %s\n", opt->descr);
     }
 
-    qemu_free (uprefix);
+    g_free (uprefix);
 }
 
 static void audio_process_options (const char *prefix,
@@ -462,7 +471,7 @@ static void audio_process_options (const char *prefix,
          * (includes trailing zero) + zero + underscore (on behalf of
          * sizeof) */
         optlen = len + preflen + sizeof (qemu_prefix) + 1;
-        optname = qemu_malloc (optlen);
+        optname = g_malloc (optlen);
 
         pstrcpy (optname, optlen, qemu_prefix);
 
@@ -507,7 +516,7 @@ static void audio_process_options (const char *prefix,
             opt->overriddenp = &opt->overridden;
         }
         *opt->overriddenp = !def;
-        qemu_free (optname);
+        g_free (optname);
     }
 }
 
@@ -778,7 +787,7 @@ static void audio_detach_capture (HWVoiceOut *hw)
 
         QLIST_REMOVE (sw, entries);
         QLIST_REMOVE (sc, entries);
-        qemu_free (sc);
+        g_free (sc);
         if (was_active) {
             /* We have removed soft voice from the capture:
                this might have changed the overall status of the capture
@@ -818,7 +827,7 @@ static int audio_attach_capture (HWVoiceOut *hw)
         sw->rate = st_rate_start (sw->info.freq, hw_cap->info.freq);
         if (!sw->rate) {
             dolog ("Could not start rate conversion for `%s'\n", SW_NAME (sw));
-            qemu_free (sw);
+            g_free (sw);
             return -1;
         }
         QLIST_INSERT_HEAD (&hw_cap->sw_head, sw, entries);
@@ -1114,7 +1123,7 @@ static int audio_is_timer_needed (void)
 static void audio_reset_timer (AudioState *s)
 {
     if (audio_is_timer_needed ()) {
-        qemu_mod_timer (s->ts, qemu_get_clock (vm_clock) + 1);
+        qemu_mod_timer (s->ts, qemu_get_clock_ns (vm_clock) + 1);
     }
     else {
         qemu_del_timer (s->ts);
@@ -1743,7 +1752,7 @@ static int audio_driver_init (AudioState *s, struct audio_driver *drv)
 }
 
 static void audio_vm_change_state_handler (void *opaque, int running,
-                                           int reason)
+                                           RunState state)
 {
     AudioState *s = opaque;
     HWVoiceOut *hwo = NULL;
@@ -1820,7 +1829,7 @@ static void audio_init (void)
     QLIST_INIT (&s->cap_head);
     atexit (audio_atexit);
 
-    s->ts = qemu_new_timer (vm_clock, audio_timer, s);
+    s->ts = qemu_new_timer_ns (vm_clock, audio_timer, s);
     if (!s->ts) {
         hw_error("Could not create audio timer\n");
     }
@@ -1872,6 +1881,31 @@ static void audio_init (void)
         }
     }
 
+#ifdef CONFIG_MARU
+// Try to avoid certain wave out locking action in recent Windows...
+// If wave out is locked (because nothing is wired to output jack, ...),
+// QEMU can find voice out device, but open will failed. And it will cause guest audio lock-up.
+// So, we test whether opening is success or not.
+// It can not prevent lock-up caused by runtime voice out lock.
+// To prevent it, QEMU audio backend structure must be changed.
+// We should do it, but now we used simple fix temporarily.
+    HWVoiceOut* hw = audio_calloc(AUDIO_FUNC, 1, s->drv->voice_size_out);
+    if (!hw) {
+        dolog ("Can not allocate voice `%s' size %d\n",
+               s->drv->name, s->drv->voice_size_out);
+    }
+    if(s->drv->pcm_ops->init_out(hw, &conf.fixed_out.settings)) {
+        INFO("Host audio out [%s] is malfunction. Change to noaudio driver\n",
+                s->drv->name);
+        done = 0;
+    }
+    else {
+        INFO("Host audio out [%s] is normal.\n", s->drv->name);
+        s->drv->pcm_ops->fini_out(hw);
+    }
+    g_free(hw);
+#endif
+
     if (!done) {
         done = !audio_driver_init (s, &no_audio_driver);
         if (!done) {
@@ -1907,7 +1941,7 @@ static void audio_init (void)
 void AUD_register_card (const char *name, QEMUSoundCard *card)
 {
     audio_init ();
-    card->name = qemu_strdup (name);
+    card->name = g_strdup (name);
     memset (&card->entries, 0, sizeof (card->entries));
     QLIST_INSERT_HEAD (&glob_audio_state.card_head, card, entries);
 }
@@ -1915,7 +1949,7 @@ void AUD_register_card (const char *name, QEMUSoundCard *card)
 void AUD_remove_card (QEMUSoundCard *card)
 {
     QLIST_REMOVE (card, entries);
-    qemu_free (card->name);
+    g_free (card->name);
 }
 
 
@@ -2000,11 +2034,11 @@ CaptureVoiceOut *AUD_add_capture (
         return cap;
 
     err3:
-        qemu_free (cap->hw.mix_buf);
+        g_free (cap->hw.mix_buf);
     err2:
-        qemu_free (cap);
+        g_free (cap);
     err1:
-        qemu_free (cb);
+        g_free (cb);
     err0:
         return NULL;
     }
@@ -2018,7 +2052,7 @@ void AUD_del_capture (CaptureVoiceOut *cap, void *cb_opaque)
         if (cb->opaque == cb_opaque) {
             cb->ops.destroy (cb_opaque);
             QLIST_REMOVE (cb, entries);
-            qemu_free (cb);
+            g_free (cb);
 
             if (!cap->cb_head.lh_first) {
                 SWVoiceOut *sw = cap->hw.sw_head.lh_first, *sw1;
@@ -2036,11 +2070,11 @@ void AUD_del_capture (CaptureVoiceOut *cap, void *cb_opaque)
                     }
                     QLIST_REMOVE (sw, entries);
                     QLIST_REMOVE (sc, entries);
-                    qemu_free (sc);
+                    g_free (sc);
                     sw = sw1;
                 }
                 QLIST_REMOVE (cap, entries);
-                qemu_free (cap);
+                g_free (cap);
             }
             return;
         }

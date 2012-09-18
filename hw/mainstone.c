@@ -14,10 +14,32 @@
 #include "net.h"
 #include "devices.h"
 #include "boards.h"
-#include "mainstone.h"
-#include "sysemu.h"
 #include "flash.h"
 #include "blockdev.h"
+#include "sysbus.h"
+#include "exec-memory.h"
+
+/* Device addresses */
+#define MST_FPGA_PHYS	0x08000000
+#define MST_ETH_PHYS	0x10000300
+#define MST_FLASH_0		0x00000000
+#define MST_FLASH_1		0x04000000
+
+/* IRQ definitions */
+#define MMC_IRQ       0
+#define USIM_IRQ      1
+#define USBC_IRQ      2
+#define ETHERNET_IRQ  3
+#define AC97_IRQ      4
+#define PEN_IRQ       5
+#define MSINS_IRQ     6
+#define EXBRD_IRQ     7
+#define S0_CD_IRQ     9
+#define S0_STSCHG_IRQ 10
+#define S0_IRQ        11
+#define S1_CD_IRQ     13
+#define S1_STSCHG_IRQ 14
+#define S1_IRQ        15
 
 static struct keymap map[0xE0] = {
     [0 ... 0xDF] = { -1, -1 },
@@ -69,7 +91,8 @@ static struct arm_boot_info mainstone_binfo = {
     .ram_size = 0x04000000,
 };
 
-static void mainstone_common_init(ram_addr_t ram_size,
+static void mainstone_common_init(MemoryRegion *address_space_mem,
+                ram_addr_t ram_size,
                 const char *kernel_filename,
                 const char *kernel_cmdline, const char *initrd_filename,
                 const char *cpu_model, enum mainstone_model_e model, int arm_id)
@@ -77,19 +100,20 @@ static void mainstone_common_init(ram_addr_t ram_size,
     uint32_t sector_len = 256 * 1024;
     target_phys_addr_t mainstone_flash_base[] = { MST_FLASH_0, MST_FLASH_1 };
     PXA2xxState *cpu;
-    qemu_irq *mst_irq;
+    DeviceState *mst_irq;
     DriveInfo *dinfo;
     int i;
     int be;
+    MemoryRegion *rom = g_new(MemoryRegion, 1);
 
     if (!cpu_model)
         cpu_model = "pxa270-c5";
 
     /* Setup CPU & memory */
-    cpu = pxa270_init(mainstone_binfo.ram_size, cpu_model);
-    cpu_register_physical_memory(0, MAINSTONE_ROM,
-                    qemu_ram_alloc(NULL, "mainstone.rom",
-                                   MAINSTONE_ROM) | IO_MEM_ROM);
+    cpu = pxa270_init(address_space_mem, mainstone_binfo.ram_size, cpu_model);
+    memory_region_init_ram(rom, NULL, "mainstone.rom", MAINSTONE_ROM);
+    memory_region_set_readonly(rom, true);
+    memory_region_add_subregion(address_space_mem, 0, rom);
 
 #ifdef TARGET_WORDS_BIGENDIAN
     be = 1;
@@ -105,10 +129,9 @@ static void mainstone_common_init(ram_addr_t ram_size,
             exit(1);
         }
 
-        if (!pflash_cfi01_register(mainstone_flash_base[i],
-                                   qemu_ram_alloc(NULL, i ? "mainstone.flash1" :
-                                                  "mainstone.flash0",
-                                                  MAINSTONE_FLASH),
+        if (!pflash_cfi01_register(mainstone_flash_base[i], NULL,
+                                   i ? "mainstone.flash1" : "mainstone.flash0",
+                                   MAINSTONE_FLASH,
                                    dinfo->bdrv, sector_len,
                                    MAINSTONE_FLASH / sector_len, 4, 0, 0, 0, 0,
                                    be)) {
@@ -117,16 +140,25 @@ static void mainstone_common_init(ram_addr_t ram_size,
         }
     }
 
-    mst_irq = mst_irq_init(cpu, MST_FPGA_PHYS, PXA2XX_PIC_GPIO_0);
+    mst_irq = sysbus_create_simple("mainstone-fpga", MST_FPGA_PHYS,
+                    qdev_get_gpio_in(cpu->gpio, 0));
 
     /* setup keypad */
     printf("map addr %p\n", &map);
     pxa27x_register_keypad(cpu->kp, map, 0xe0);
 
     /* MMC/SD host */
-    pxa2xx_mmci_handlers(cpu->mmc, NULL, mst_irq[MMC_IRQ]);
+    pxa2xx_mmci_handlers(cpu->mmc, NULL, qdev_get_gpio_in(mst_irq, MMC_IRQ));
 
-    smc91c111_init(&nd_table[0], MST_ETH_PHYS, mst_irq[ETHERNET_IRQ]);
+    pxa2xx_pcmcia_set_irq_cb(cpu->pcmcia[0],
+            qdev_get_gpio_in(mst_irq, S0_IRQ),
+            qdev_get_gpio_in(mst_irq, S0_CD_IRQ));
+    pxa2xx_pcmcia_set_irq_cb(cpu->pcmcia[1],
+            qdev_get_gpio_in(mst_irq, S1_IRQ),
+            qdev_get_gpio_in(mst_irq, S1_CD_IRQ));
+
+    smc91c111_init(&nd_table[0], MST_ETH_PHYS,
+                    qdev_get_gpio_in(mst_irq, ETHERNET_IRQ));
 
     mainstone_binfo.kernel_filename = kernel_filename;
     mainstone_binfo.kernel_cmdline = kernel_cmdline;
@@ -140,7 +172,7 @@ static void mainstone_init(ram_addr_t ram_size,
                 const char *kernel_filename, const char *kernel_cmdline,
                 const char *initrd_filename, const char *cpu_model)
 {
-    mainstone_common_init(ram_size, kernel_filename,
+    mainstone_common_init(get_system_memory(), ram_size, kernel_filename,
                 kernel_cmdline, initrd_filename, cpu_model, mainstone, 0x196);
 }
 

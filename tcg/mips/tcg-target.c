@@ -379,13 +379,14 @@ static inline void tcg_out_nop(TCGContext *s)
     tcg_out32(s, 0);
 }
 
-static inline void tcg_out_mov(TCGContext *s, TCGType type, int ret, int arg)
+static inline void tcg_out_mov(TCGContext *s, TCGType type,
+                               TCGReg ret, TCGReg arg)
 {
     tcg_out_opc_reg(s, OPC_ADDU, ret, arg, TCG_REG_ZERO);
 }
 
 static inline void tcg_out_movi(TCGContext *s, TCGType type,
-                                int reg, int32_t arg)
+                                TCGReg reg, tcg_target_long arg)
 {
     if (arg == (int16_t)arg) {
         tcg_out_opc_imm(s, OPC_ADDIU, reg, TCG_REG_ZERO, arg);
@@ -480,14 +481,14 @@ static inline void tcg_out_ldst(TCGContext *s, int opc, int arg,
     }
 }
 
-static inline void tcg_out_ld(TCGContext *s, TCGType type, int arg,
-                              int arg1, tcg_target_long arg2)
+static inline void tcg_out_ld(TCGContext *s, TCGType type, TCGReg arg,
+                              TCGReg arg1, tcg_target_long arg2)
 {
     tcg_out_ldst(s, OPC_LW, arg, arg1, arg2);
 }
 
-static inline void tcg_out_st(TCGContext *s, TCGType type, int arg,
-                              int arg1, tcg_target_long arg2)
+static inline void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg,
+                              TCGReg arg1, tcg_target_long arg2)
 {
     tcg_out_ldst(s, OPC_SW, arg, arg1, arg2);
 }
@@ -1452,9 +1453,7 @@ static const TCGTargetOpDef mips_op_defs[] = {
 };
 
 static int tcg_target_callee_save_regs[] = {
-#if 0 /* used for the global env (TCG_AREG0), so no need to save */
-    TCG_REG_S0,
-#endif
+    TCG_REG_S0,       /* used for the global env (TCG_AREG0) */
     TCG_REG_S1,
     TCG_REG_S2,
     TCG_REG_S3,
@@ -1486,8 +1485,8 @@ static void tcg_target_qemu_prologue(TCGContext *s)
     }
 
     /* Call generated code */
-    tcg_out_opc_reg(s, OPC_JR, 0, TCG_REG_A0, 0);
-    tcg_out_nop(s);
+    tcg_out_opc_reg(s, OPC_JR, 0, tcg_target_call_iarg_regs[1], 0);
+    tcg_out_mov(s, TCG_TYPE_PTR, TCG_AREG0, tcg_target_call_iarg_regs[0]);
     tb_ret_addr = s->code_ptr;
 
     /* TB epilogue */
@@ -1530,4 +1529,6 @@ static void tcg_target_init(TCGContext *s)
     tcg_regset_set_reg(s->reserved_regs, TCG_REG_SP);   /* stack pointer */
 
     tcg_add_target_add_op_defs(mips_op_defs);
+    tcg_set_frame(s, TCG_AREG0, offsetof(CPUState, temp_buf),
+                  CPU_TEMP_BUF_NLONGS * sizeof(long));
 }

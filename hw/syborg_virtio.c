@@ -26,7 +26,6 @@
 #include "sysbus.h"
 #include "virtio.h"
 #include "virtio-net.h"
-#include "sysemu.h"
 
 //#define DEBUG_SYBORG_VIRTIO
 
@@ -132,9 +131,7 @@ static void syborg_virtio_writel(void *opaque, target_phys_addr_t offset,
     }
     switch (offset >> 2) {
     case SYBORG_VIRTIO_GUEST_FEATURES:
-        if (vdev->set_features)
-            vdev->set_features(vdev, value);
-        vdev->guest_features = value;
+        virtio_set_features(vdev, value);
         break;
     case SYBORG_VIRTIO_QUEUE_BASE:
         if (value == 0)
@@ -147,7 +144,9 @@ static void syborg_virtio_writel(void *opaque, target_phys_addr_t offset,
             vdev->queue_sel = value;
         break;
     case SYBORG_VIRTIO_QUEUE_NOTIFY:
-        virtio_queue_notify(vdev, value);
+        if (value < VIRTIO_PCI_QUEUE_MAX) {
+            virtio_queue_notify(vdev, value);
+        }
         break;
     case SYBORG_VIRTIO_STATUS:
         virtio_set_status(vdev, value & 0xFF);

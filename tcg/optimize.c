@@ -1,7 +1,8 @@
 /*
  * Optimizations for Tiny Code Generator for QEMU
  *
- * Copyright (c) 2010 Kirill Batuzov
+ * Copyright (c) 2010 Samsung Electronics.
+ * Contributed by Kirill Batuzov <batuzovk@ispras.ru>
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -26,284 +27,265 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <string.h>
-#include <inttypes.h>
-#ifdef _WIN32
-#include <malloc.h>
-#endif
-#ifdef _AIX
-#include <alloca.h>
-#endif
 
 #include "qemu-common.h"
-#include "cache-utils.h"
-#include "host-utils.h"
-#define NO_CPU_IO_DEFS
-#include "cpu.h"
-#include "exec-all.h"
-
 #include "tcg-op.h"
-#include "elf.h"
 
-#if defined(CONFIG_USE_GUEST_BASE) && !defined(TCG_TARGET_HAS_GUEST_BASE)
-#error GUEST_BASE not supported on this host.
-#endif
+#define CASE_OP_32_64(x)                        \
+        glue(glue(case INDEX_op_, x), _i32):    \
+        glue(glue(case INDEX_op_, x), _i64)
 
-typedef enum { TCG_TEMP_UNDEF = 0, TCG_TEMP_CONST, TCG_TEMP_COPY, TCG_TEMP_ANY } tcg_temp_state;
+typedef enum {
+    TCG_TEMP_UNDEF = 0,
+    TCG_TEMP_CONST,
+    TCG_TEMP_COPY,
+    TCG_TEMP_HAS_COPY,
+    TCG_TEMP_ANY
+} tcg_temp_state;
 
-const int mov_opc[] = {
-    INDEX_op_mov_i32,
-#if TCG_TARGET_REG_BITS == 64
-    INDEX_op_mov_i64,
-#endif
+struct tcg_temp_info {
+    tcg_temp_state state;
+    uint16_t prev_copy;
+    uint16_t next_copy;
+    tcg_target_ulong val;
 };
 
-static int op_to_opi(int op)
+static struct tcg_temp_info temps[TCG_MAX_TEMPS];
+
+/* Reset TEMP's state to TCG_TEMP_ANY.  If TEMP was a representative of some
+   class of equivalent temp's, a new representative should be chosen in this
+   class. */
+static void reset_temp(TCGArg temp, int nb_temps, int nb_globals)
 {
-    switch(op) {
-        case INDEX_op_mov_i32: return INDEX_op_movi_i32;
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_mov_i64: return INDEX_op_movi_i64;
-#endif
-        default:
-            fprintf(stderr, "INTERNAL ERROR: TCG optimizer encountered an "
-                            "unrecognized operation in op_to_opi.\n");
-            exit(1);
+    int i;
+    TCGArg new_base = (TCGArg)-1;
+    if (temps[temp].state == TCG_TEMP_HAS_COPY) {
+        for (i = temps[temp].next_copy; i != temp; i = temps[i].next_copy) {
+            if (i >= nb_globals) {
+                temps[i].state = TCG_TEMP_HAS_COPY;
+                new_base = i;
+                break;
+            }
+        }
+        for (i = temps[temp].next_copy; i != temp; i = temps[i].next_copy) {
+            if (new_base == (TCGArg)-1) {
+                temps[i].state = TCG_TEMP_ANY;
+            } else {
+                temps[i].val = new_base;
+            }
+        }
+        temps[temps[temp].next_copy].prev_copy = temps[temp].prev_copy;
+        temps[temps[temp].prev_copy].next_copy = temps[temp].next_copy;
+    } else if (temps[temp].state == TCG_TEMP_COPY) {
+        temps[temps[temp].next_copy].prev_copy = temps[temp].prev_copy;
+        temps[temps[temp].prev_copy].next_copy = temps[temp].next_copy;
+        new_base = temps[temp].val;
+    }
+    temps[temp].state = TCG_TEMP_ANY;
+    if (new_base != (TCGArg)-1 && temps[new_base].next_copy == new_base) {
+        temps[new_base].state = TCG_TEMP_ANY;
     }
 }
 
-static int op_bits(int op)
+static int op_bits(TCGOpcode op)
 {
-    switch(op) {
-        case INDEX_op_mov_i32:
-        case INDEX_op_add_i32:
-        case INDEX_op_sub_i32:
-        case INDEX_op_mul_i32:
-        case INDEX_op_and_i32:
-        case INDEX_op_or_i32:
-        case INDEX_op_xor_i32:
-        case INDEX_op_shl_i32:
-        case INDEX_op_shr_i32:
-        case INDEX_op_sar_i32:
-        case INDEX_op_rotl_i32:
-        case INDEX_op_rotr_i32:
-            return 32;
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_mov_i64:
-        case INDEX_op_add_i64:
-        case INDEX_op_sub_i64:
-        case INDEX_op_mul_i64:
-        case INDEX_op_and_i64:
-        case INDEX_op_or_i64:
-        case INDEX_op_xor_i64:
-        case INDEX_op_shl_i64:
-        case INDEX_op_shr_i64:
-        case INDEX_op_sar_i64:
-        case INDEX_op_rotl_i64:
-        case INDEX_op_rotr_i64:
-            return 64;
-#endif
-        default:
-            fprintf(stderr, "INTERNAL ERROR: TCG optimizer encountered an "
-                            "unrecognized operation in op_bits.\n");
-            exit(1);
-    }
+    const TCGOpDef *def = &tcg_op_defs[op];
+    return def->flags & TCG_OPF_64BIT ? 64 : 32;
 }
 
-static int op_to_movi(int op)
+static TCGOpcode op_to_movi(TCGOpcode op)
 {
-    if (op_bits(op) == 32)
+    switch (op_bits(op)) {
+    case 32:
         return INDEX_op_movi_i32;
-#if TCG_TARGET_REG_BITS == 64
-    if (op_bits(op) == 64)
+    case 64:
         return INDEX_op_movi_i64;
-#endif
-    fprintf(stderr, "INTERNAL ERROR: TCG optimizer encountered an "
-                    "unrecognized operation in op_to_movi.\n");
-    exit(1);
-}
-
-static TCGArg do_constant_folding_2(int op, TCGArg x, TCGArg y)
-{
-    TCGArg r;
-    switch(op) {
-        case INDEX_op_add_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_add_i64:
-#endif
-            return x + y;
-
-        case INDEX_op_sub_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_sub_i64:
-#endif
-            return x - y;
-
-        case INDEX_op_mul_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_mul_i64:
-#endif
-            return x * y;
-
-        case INDEX_op_and_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_and_i64:
-#endif
-            return x & y;
-
-        case INDEX_op_or_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_or_i64:
-#endif
-            return x | y;
-
-        case INDEX_op_xor_i32:
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_xor_i64:
-#endif
-            return x ^ y;
-
-        case INDEX_op_shl_i32:
-#if TCG_TARGET_REG_BITS == 64
-            y &= 0xffffffff;
-        case INDEX_op_shl_i64:
-#endif
-            return x << y;
-
-        case INDEX_op_shr_i32:
-#if TCG_TARGET_REG_BITS == 64
-            x &= 0xffffffff;
-            y &= 0xffffffff;
-        case INDEX_op_shr_i64:
-#endif
-            /* Assuming TCGArg to be unsigned */
-            return x >> y;
-
-        case INDEX_op_sar_i32:
-#if TCG_TARGET_REG_BITS == 64
-            x &= 0xffffffff;
-            y &= 0xffffffff;
-#endif
-            r = x & 0x80000000;
-            x &= ~0x80000000;
-            x >>= y;
-            r |= r - (r >> y);
-            x |= r;
-            return x;
-
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_sar_i64:
-            r = x & 0x8000000000000000ULL;
-            x &= ~0x8000000000000000ULL;
-            x >>= y;
-            r |= r - (r >> y);
-            x |= r;
-            return x;
-#endif
-
-        case INDEX_op_rotr_i32:
-#if TCG_TARGET_REG_BITS == 64
-            x &= 0xffffffff;
-            y &= 0xffffffff;
-#endif
-            x = (x << (32 - y)) | (x >> y);
-            return x;
-
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_rotr_i64:
-            x = (x << (64 - y)) | (x >> y);
-            return x;
-#endif
-
-        case INDEX_op_rotl_i32:
-#if TCG_TARGET_REG_BITS == 64
-            x &= 0xffffffff;
-            y &= 0xffffffff;
-#endif
-            x = (x << y) | (x >> (32 - y));
-            return x;
-
-#if TCG_TARGET_REG_BITS == 64
-        case INDEX_op_rotl_i64:
-            x = (x << y) | (x >> (64 - y));
-            return x;
-#endif
-
-        default:
-            fprintf(stderr, "INTERNAL ERROR: TCG optimizer encountered an "
-                            "unrecognized operation in do_constant_folding.\n");
-            exit(1);
+    default:
+        fprintf(stderr, "op_to_movi: unexpected return value of "
+                "function op_bits.\n");
+        tcg_abort();
     }
 }
 
-static TCGArg do_constant_folding(int op, TCGArg x, TCGArg y)
+static void tcg_opt_gen_mov(TCGContext *s, TCGArg *gen_args, TCGArg dst,
+                            TCGArg src, int nb_temps, int nb_globals)
+{
+        reset_temp(dst, nb_temps, nb_globals);
+        assert(temps[src].state != TCG_TEMP_COPY);
+        /* Don't try to copy if one of temps is a global or either one
+           is local and another is register */
+        if (src >= nb_globals && dst >= nb_globals &&
+            tcg_arg_is_local(s, src) == tcg_arg_is_local(s, dst)) {
+            assert(temps[src].state != TCG_TEMP_CONST);
+            if (temps[src].state != TCG_TEMP_HAS_COPY) {
+                temps[src].state = TCG_TEMP_HAS_COPY;
+                temps[src].next_copy = src;
+                temps[src].prev_copy = src;
+            }
+            temps[dst].state = TCG_TEMP_COPY;
+            temps[dst].val = src;
+            temps[dst].next_copy = temps[src].next_copy;
+            temps[dst].prev_copy = src;
+            temps[temps[dst].next_copy].prev_copy = dst;
+            temps[src].next_copy = dst;
+        }
+        gen_args[0] = dst;
+        gen_args[1] = src;
+}
+
+static void tcg_opt_gen_movi(TCGArg *gen_args, TCGArg dst, TCGArg val,
+                             int nb_temps, int nb_globals)
+{
+        reset_temp(dst, nb_temps, nb_globals);
+        temps[dst].state = TCG_TEMP_CONST;
+        temps[dst].val = val;
+        gen_args[0] = dst;
+        gen_args[1] = val;
+}
+
+static TCGOpcode op_to_mov(TCGOpcode op)
+{
+    switch (op_bits(op)) {
+    case 32:
+        return INDEX_op_mov_i32;
+    case 64:
+        return INDEX_op_mov_i64;
+    default:
+        fprintf(stderr, "op_to_mov: unexpected return value of "
+                "function op_bits.\n");
+        tcg_abort();
+    }
+}
+
+static TCGArg do_constant_folding_2(TCGOpcode op, TCGArg x, TCGArg y)
+{
+    switch (op) {
+    CASE_OP_32_64(add):
+        return x + y;
+
+    CASE_OP_32_64(sub):
+        return x - y;
+
+    CASE_OP_32_64(mul):
+        return x * y;
+
+    CASE_OP_32_64(and):
+        return x & y;
+
+    CASE_OP_32_64(or):
+        return x | y;
+
+    CASE_OP_32_64(xor):
+        return x ^ y;
+
+    case INDEX_op_shl_i32:
+        return (uint32_t)x << (uint32_t)y;
+
+    case INDEX_op_shl_i64:
+        return (uint64_t)x << (uint64_t)y;
+
+    case INDEX_op_shr_i32:
+        return (uint32_t)x >> (uint32_t)y;
+
+    case INDEX_op_shr_i64:
+        return (uint64_t)x >> (uint64_t)y;
+
+    case INDEX_op_sar_i32:
+        return (int32_t)x >> (int32_t)y;
+
+    case INDEX_op_sar_i64:
+        return (int64_t)x >> (int64_t)y;
+
+    case INDEX_op_rotr_i32:
+        x = ((uint32_t)x << (32 - y)) | ((uint32_t)x >> y);
+        return x;
+
+    case INDEX_op_rotr_i64:
+        x = ((uint64_t)x << (64 - y)) | ((uint64_t)x >> y);
+        return x;
+
+    case INDEX_op_rotl_i32:
+        x = ((uint32_t)x << y) | ((uint32_t)x >> (32 - y));
+        return x;
+
+    case INDEX_op_rotl_i64:
+        x = ((uint64_t)x << y) | ((uint64_t)x >> (64 - y));
+        return x;
+
+    CASE_OP_32_64(not):
+        return ~x;
+
+    CASE_OP_32_64(neg):
+        return -x;
+
+    CASE_OP_32_64(andc):
+        return x & ~y;
+
+    CASE_OP_32_64(orc):
+        return x | ~y;
+
+    CASE_OP_32_64(eqv):
+        return ~(x ^ y);
+
+    CASE_OP_32_64(nand):
+        return ~(x & y);
+
+    CASE_OP_32_64(nor):
+        return ~(x | y);
+
+    CASE_OP_32_64(ext8s):
+        return (int8_t)x;
+
+    CASE_OP_32_64(ext16s):
+        return (int16_t)x;
+
+    CASE_OP_32_64(ext8u):
+        return (uint8_t)x;
+
+    CASE_OP_32_64(ext16u):
+        return (uint16_t)x;
+
+    case INDEX_op_ext32s_i64:
+        return (int32_t)x;
+
+    case INDEX_op_ext32u_i64:
+        return (uint32_t)x;
+
+    default:
+        fprintf(stderr,
+                "Unrecognized operation %d in do_constant_folding.\n", op);
+        tcg_abort();
+    }
+}
+
+static TCGArg do_constant_folding(TCGOpcode op, TCGArg x, TCGArg y)
 {
     TCGArg res = do_constant_folding_2(op, x, y);
-#if TCG_TARGET_REG_BITS == 64
     if (op_bits(op) == 32) {
         res &= 0xffffffff;
     }
-#endif
     return res;
 }
 
-static void reset_temp(tcg_temp_state *state, tcg_target_ulong *vals,
-        TCGArg temp, int nb_temps, int nb_globals)
-{
-    int i;
-    TCGArg new_base;
-    new_base = (TCGArg)-1;
-#if 0
-    for (i = 0; i < nb_temps; i++) {
-        if (state[i] == TCG_TEMP_COPY && vals[i] == temp) {
-            if (new_base == ((TCGArg)-1)) {
-                new_base = (TCGArg)i;
-                state[i] = TCG_TEMP_ANY;
-            } else {
-                vals[i] = new_base;
-            }
-        }
-    }
-#else
-    for (i = nb_globals; i < nb_temps; i++) {
-        if (state[i] == TCG_TEMP_COPY && vals[i] == temp) {
-            if (new_base == ((TCGArg)-1)) {
-                new_base = (TCGArg)i;
-                state[i] = TCG_TEMP_ANY;
-            } else {
-                vals[i] = new_base;
-            }
-        }
-    }
-    for (i = 0; i < nb_globals; i++) {
-        if (state[i] == TCG_TEMP_COPY && vals[i] == temp) {
-            if (new_base == ((TCGArg)-1)) {
-                state[i] = TCG_TEMP_ANY;
-            } else {
-                vals[i] = new_base;
-            }
-        }
-    }
-#endif
-    state[temp] = TCG_TEMP_ANY;
-}
-
+/* Propagate constants and copies, fold constant expressions. */
 static TCGArg *tcg_constant_folding(TCGContext *s, uint16_t *tcg_opc_ptr,
                                     TCGArg *args, TCGOpDef *tcg_op_defs)
 {
-    int i, nb_ops, op_index, op, nb_temps, nb_globals;
+    int i, nb_ops, op_index, nb_temps, nb_globals, nb_call_args;
+    TCGOpcode op;
     const TCGOpDef *def;
     TCGArg *gen_args;
-    tcg_target_ulong *vals;
-    tcg_temp_state *state;
+    TCGArg tmp;
+    /* Array VALS has an element for each temp.
+       If this temp holds a constant then its value is kept in VALS' element.
+       If this temp is a copy of other ones then this equivalence class'
+       representative is kept in VALS' element.
+       If this temp is neither copy nor constant then corresponding VALS'
+       element is unused. */
 
     nb_temps = s->nb_temps;
     nb_globals = s->nb_globals;
-    state = (tcg_temp_state *)malloc(sizeof(tcg_temp_state) * nb_temps);
-    vals = (tcg_target_ulong *)malloc(sizeof(tcg_target_ulong) * nb_temps);
-    memset(state, 0, nb_temps * sizeof(tcg_temp_state));
-
-    //	gen_opc_ptr++; /* Skip end? What is this? */
+    memset(temps, 0, nb_temps * sizeof(struct tcg_temp_info));
 
     nb_ops = tcg_opc_ptr - gen_opc_buf;
     gen_args = args;
@@ -311,169 +293,225 @@ static TCGArg *tcg_constant_folding(TCGContext *s, uint16_t *tcg_opc_ptr,
         op = gen_opc_buf[op_index];
         def = &tcg_op_defs[op];
         /* Do copy propagation */
-        if (op != INDEX_op_call) {
+        if (!(def->flags & (TCG_OPF_CALL_CLOBBER | TCG_OPF_SIDE_EFFECTS))) {
+            assert(op != INDEX_op_call);
             for (i = def->nb_oargs; i < def->nb_oargs + def->nb_iargs; i++) {
-                if (state[args[i]] == TCG_TEMP_COPY
-                    && !(def->args_ct[i].ct & TCG_CT_IALIAS)
-                    /* TODO: is this check really needed??? */
-                    && (def->args_ct[i].ct & TCG_CT_REG)) {
-/*                    if (vals[args[i]] < s->nb_globals)
-                        printf("Fuuu\n");*/
-                    args[i] = vals[args[i]];
+                if (temps[args[i]].state == TCG_TEMP_COPY) {
+                    args[i] = temps[args[i]].val;
                 }
             }
+        }
+
+        /* For commutative operations make constant second argument */
+        switch (op) {
+        CASE_OP_32_64(add):
+        CASE_OP_32_64(mul):
+        CASE_OP_32_64(and):
+        CASE_OP_32_64(or):
+        CASE_OP_32_64(xor):
+        CASE_OP_32_64(eqv):
+        CASE_OP_32_64(nand):
+        CASE_OP_32_64(nor):
+            if (temps[args[1]].state == TCG_TEMP_CONST) {
+                tmp = args[1];
+                args[1] = args[2];
+                args[2] = tmp;
+            }
+            break;
+        default:
+            break;
+        }
+
+        /* Simplify expression if possible. */
+        switch (op) {
+        CASE_OP_32_64(add):
+        CASE_OP_32_64(sub):
+        CASE_OP_32_64(shl):
+        CASE_OP_32_64(shr):
+        CASE_OP_32_64(sar):
+        CASE_OP_32_64(rotl):
+        CASE_OP_32_64(rotr):
+            if (temps[args[1]].state == TCG_TEMP_CONST) {
+                /* Proceed with possible constant folding. */
+                break;
+            }
+            if (temps[args[2]].state == TCG_TEMP_CONST
+                && temps[args[2]].val == 0) {
+                if ((temps[args[0]].state == TCG_TEMP_COPY
+                    && temps[args[0]].val == args[1])
+                    || args[0] == args[1]) {
+                    args += 3;
+                    gen_opc_buf[op_index] = INDEX_op_nop;
+                } else {
+                    gen_opc_buf[op_index] = op_to_mov(op);
+                    tcg_opt_gen_mov(s, gen_args, args[0], args[1],
+                                    nb_temps, nb_globals);
+                    gen_args += 2;
+                    args += 3;
+                }
+                continue;
+            }
+            break;
+        CASE_OP_32_64(mul):
+            if ((temps[args[2]].state == TCG_TEMP_CONST
+                && temps[args[2]].val == 0)) {
+                gen_opc_buf[op_index] = op_to_movi(op);
+                tcg_opt_gen_movi(gen_args, args[0], 0, nb_temps, nb_globals);
+                args += 3;
+                gen_args += 2;
+                continue;
+            }
+            break;
+        CASE_OP_32_64(or):
+        CASE_OP_32_64(and):
+            if (args[1] == args[2]) {
+                if (args[1] == args[0]) {
+                    args += 3;
+                    gen_opc_buf[op_index] = INDEX_op_nop;
+                } else {
+                    gen_opc_buf[op_index] = op_to_mov(op);
+                    tcg_opt_gen_mov(s, gen_args, args[0], args[1], nb_temps,
+                                    nb_globals);
+                    gen_args += 2;
+                    args += 3;
+                }
+                continue;
+            }
+            break;
+        default:
+            break;
         }
 
         /* Propagate constants through copy operations and do constant
            folding.  Constants will be substituted to arguments by register
            allocator where needed and possible.  Also detect copies. */
-        switch(op) {
-            case INDEX_op_mov_i32:
-#if TCG_TARGET_REG_BITS == 64
-            case INDEX_op_mov_i64:
-#endif
-                if ((state[args[1]] == TCG_TEMP_COPY
-                    && vals[args[1]] == args[0])
-                    || args[0] == args[1]) {
-                    args += 2;
-                    gen_opc_buf[op_index] = INDEX_op_nop;
-                    break;
-                }
-                if (state[args[1]] != TCG_TEMP_CONST) {
-                    reset_temp(state, vals, args[0], nb_temps, nb_globals);
-                    if (args[1] >= s->nb_globals) {
-                        state[args[0]] = TCG_TEMP_COPY;
-                        vals[args[0]] = args[1];
-                    }
-                    gen_args[0] = args[0];
-                    gen_args[1] = args[1];
-                    gen_args += 2;
-                    args += 2;
-                    break;
-                } else {
-                    /* Source argument is constant.  Rewrite the operation and
-                       let movi case handle it. */
-                    op = op_to_opi(op);
-                    gen_opc_buf[op_index] = op;
-                    args[1] = vals[args[1]];
-                    /* fallthrough */
-                }
-            case INDEX_op_movi_i32:
-#if TCG_TARGET_REG_BITS == 64
-            case INDEX_op_movi_i64:
-#endif
-                reset_temp(state, vals, args[0], nb_temps, nb_globals);
-                state[args[0]] = TCG_TEMP_CONST;
-                vals[args[0]] = args[1];
+        switch (op) {
+        CASE_OP_32_64(mov):
+            if ((temps[args[1]].state == TCG_TEMP_COPY
+                && temps[args[1]].val == args[0])
+                || args[0] == args[1]) {
+                args += 2;
+                gen_opc_buf[op_index] = INDEX_op_nop;
+                break;
+            }
+            if (temps[args[1]].state != TCG_TEMP_CONST) {
+                tcg_opt_gen_mov(s, gen_args, args[0], args[1],
+                                nb_temps, nb_globals);
+                gen_args += 2;
+                args += 2;
+                break;
+            }
+            /* Source argument is constant.  Rewrite the operation and
+               let movi case handle it. */
+            op = op_to_movi(op);
+            gen_opc_buf[op_index] = op;
+            args[1] = temps[args[1]].val;
+            /* fallthrough */
+        CASE_OP_32_64(movi):
+            tcg_opt_gen_movi(gen_args, args[0], args[1], nb_temps, nb_globals);
+            gen_args += 2;
+            args += 2;
+            break;
+        CASE_OP_32_64(not):
+        CASE_OP_32_64(neg):
+        CASE_OP_32_64(ext8s):
+        CASE_OP_32_64(ext8u):
+        CASE_OP_32_64(ext16s):
+        CASE_OP_32_64(ext16u):
+        case INDEX_op_ext32s_i64:
+        case INDEX_op_ext32u_i64:
+            if (temps[args[1]].state == TCG_TEMP_CONST) {
+                gen_opc_buf[op_index] = op_to_movi(op);
+                tmp = do_constant_folding(op, temps[args[1]].val, 0);
+                tcg_opt_gen_movi(gen_args, args[0], tmp, nb_temps, nb_globals);
+                gen_args += 2;
+                args += 2;
+                break;
+            } else {
+                reset_temp(args[0], nb_temps, nb_globals);
                 gen_args[0] = args[0];
                 gen_args[1] = args[1];
                 gen_args += 2;
                 args += 2;
                 break;
-            case INDEX_op_or_i32:
-            case INDEX_op_and_i32:
-#if TCG_TARGET_REG_BITS == 64
-            case INDEX_op_and_i64:
-            case INDEX_op_or_i64:
-#endif
-                if (args[1] == args[2]) {
-                    if (args[1] == args[0]) {
-                        args += 3;
-                        gen_opc_buf[op_index] = INDEX_op_nop;
-                    } else {
-                        reset_temp(state, vals, args[0], nb_temps, nb_globals);
-                        if (args[1] >= s->nb_globals) {
-                            state[args[0]] = TCG_TEMP_COPY;
-                            vals[args[0]] = args[1];
-                        }
-                        gen_opc_buf[op_index] = mov_opc[op_bits(op) / 32 - 1];
-                        gen_args[0] = args[0];
-                        gen_args[1] = args[1];
-                        gen_args += 2;
-                        args += 3;
-                    }
-                    break;
-                }
-                /* Proceede with default binary operation handling */
-            case INDEX_op_add_i32:
-            case INDEX_op_sub_i32:
-            case INDEX_op_xor_i32:
-            case INDEX_op_mul_i32:
-            case INDEX_op_shl_i32:
-            case INDEX_op_shr_i32:
-            case INDEX_op_sar_i32:
-            case INDEX_op_rotl_i32:
-            case INDEX_op_rotr_i32:
-#if TCG_TARGET_REG_BITS == 64
-            case INDEX_op_add_i64:
-            case INDEX_op_sub_i64:
-            case INDEX_op_xor_i64:
-            case INDEX_op_mul_i64:
-            case INDEX_op_shl_i64:
-            case INDEX_op_shr_i64:
-            case INDEX_op_sar_i64:
-            case INDEX_op_rotl_i64:
-            case INDEX_op_rotr_i64:
-#endif
-                if (state[args[1]] == TCG_TEMP_CONST
-                    && state[args[2]] == TCG_TEMP_CONST)
-                {
-                    gen_opc_buf[op_index] = op_to_movi(op);
-                    gen_args[0] = args[0];
-                    gen_args[1] = do_constant_folding(op, vals[args[1]], vals[args[2]]);
-                    reset_temp(state, vals, gen_args[0], nb_temps, nb_globals);
-                    state[gen_args[0]] = TCG_TEMP_CONST;
-                    vals[gen_args[0]] = gen_args[1];
-                    gen_args += 2;
-                    args += 3;
-                    break;
-                } else {
-                    reset_temp(state, vals, args[0], nb_temps, nb_globals);
-                    gen_args[0] = args[0];
-                    gen_args[1] = args[1];
-                    gen_args[2] = args[2];
-                    gen_args += 3;
-                    args += 3;
-                    break;
-                }
-            case INDEX_op_call:
-            case INDEX_op_jmp:
-            case INDEX_op_br:
-            case INDEX_op_brcond_i32:
-            case INDEX_op_set_label:
-#if TCG_TARGET_REG_BITS == 64
-            case INDEX_op_brcond_i64:
-#endif
-                memset(state, 0, nb_temps * sizeof(tcg_temp_state));
-                i = (op == INDEX_op_call) ?
-                    (args[0] >> 16) + (args[0] & 0xffff) + 3 :
-                    def->nb_args;
-                while (i) {
-                    *gen_args = *args;
-                    args++;
-                    gen_args++;
-                    i--;
-                }
+            }
+        CASE_OP_32_64(add):
+        CASE_OP_32_64(sub):
+        CASE_OP_32_64(mul):
+        CASE_OP_32_64(or):
+        CASE_OP_32_64(and):
+        CASE_OP_32_64(xor):
+        CASE_OP_32_64(shl):
+        CASE_OP_32_64(shr):
+        CASE_OP_32_64(sar):
+        CASE_OP_32_64(rotl):
+        CASE_OP_32_64(rotr):
+        CASE_OP_32_64(andc):
+        CASE_OP_32_64(orc):
+        CASE_OP_32_64(eqv):
+        CASE_OP_32_64(nand):
+        CASE_OP_32_64(nor):
+            if (temps[args[1]].state == TCG_TEMP_CONST
+                && temps[args[2]].state == TCG_TEMP_CONST) {
+                gen_opc_buf[op_index] = op_to_movi(op);
+                tmp = do_constant_folding(op, temps[args[1]].val,
+                                          temps[args[2]].val);
+                tcg_opt_gen_movi(gen_args, args[0], tmp, nb_temps, nb_globals);
+                gen_args += 2;
+                args += 3;
                 break;
-            default:
-                /* Default case: we do know nothing about operation so no
-                   propagation is done.  We only trash output args.  */
-                for (i = 0; i < def->nb_oargs; i++) {
-                    reset_temp(state, vals, args[i], nb_temps, nb_globals);
-                }
-                for (i = 0; i < def->nb_args; i++) {
-                    gen_args[i] = args[i];
-                }
-                args += def->nb_args;
-                gen_args += def->nb_args;
+            } else {
+                reset_temp(args[0], nb_temps, nb_globals);
+                gen_args[0] = args[0];
+                gen_args[1] = args[1];
+                gen_args[2] = args[2];
+                gen_args += 3;
+                args += 3;
                 break;
+            }
+        case INDEX_op_call:
+            nb_call_args = (args[0] >> 16) + (args[0] & 0xffff);
+            if (!(args[nb_call_args + 1] & (TCG_CALL_CONST | TCG_CALL_PURE))) {
+                for (i = 0; i < nb_globals; i++) {
+                    reset_temp(i, nb_temps, nb_globals);
+                }
+            }
+            for (i = 0; i < (args[0] >> 16); i++) {
+                reset_temp(args[i + 1], nb_temps, nb_globals);
+            }
+            i = nb_call_args + 3;
+            while (i) {
+                *gen_args = *args;
+                args++;
+                gen_args++;
+                i--;
+            }
+            break;
+        case INDEX_op_set_label:
+        case INDEX_op_jmp:
+        case INDEX_op_br:
+        CASE_OP_32_64(brcond):
+            memset(temps, 0, nb_temps * sizeof(struct tcg_temp_info));
+            for (i = 0; i < def->nb_args; i++) {
+                *gen_args = *args;
+                args++;
+                gen_args++;
+            }
+            break;
+        default:
+            /* Default case: we do know nothing about operation so no
+               propagation is done.  We only trash output args.  */
+            for (i = 0; i < def->nb_oargs; i++) {
+                reset_temp(args[i], nb_temps, nb_globals);
+            }
+            for (i = 0; i < def->nb_args; i++) {
+                gen_args[i] = args[i];
+            }
+            args += def->nb_args;
+            gen_args += def->nb_args;
+            break;
         }
     }
-
-	if (vals)
-		free(vals);
-	if (state)
-		free(state);
 
     return gen_args;
 }

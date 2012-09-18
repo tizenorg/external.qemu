@@ -21,7 +21,6 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
-#include <signal.h>
 #include <errno.h>
 #include <sys/ucontext.h>
 
@@ -31,8 +30,6 @@
 #undef uc_stack
 #undef uc_link
 #endif
-
-#include <signal.h>
 
 #include "qemu.h"
 #include "qemu-common.h"
@@ -322,7 +319,6 @@ static void setup_frame(int sig, struct emulated_sigaction *ka,
 			void *set, CPUState *env)
 {
 	void *frame;
-	int i, err = 0;
 
     fprintf(stderr, "setup_frame %d\n", sig);
 	frame = get_sigframe(ka, env, sizeof(*frame));

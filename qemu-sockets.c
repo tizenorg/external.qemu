@@ -572,6 +572,7 @@ int unix_connect_opts(QemuOpts *opts)
     snprintf(un.sun_path, sizeof(un.sun_path), "%s", path);
     if (connect(sock, (struct sockaddr*) &un, sizeof(un)) < 0) {
         fprintf(stderr, "connect(unix:%s): %s\n", path, strerror(errno));
+        close(sock);
 	return -1;
     }
 
@@ -593,10 +594,10 @@ int unix_listen(const char *str, char *ostr, int olen)
     if (optstr) {
         len = optstr - str;
         if (len) {
-            path = qemu_malloc(len+1);
+            path = g_malloc(len+1);
             snprintf(path, len+1, "%.*s", len, str);
             qemu_opt_set(opts, "path", path);
-            qemu_free(path);
+            g_free(path);
         }
     } else {
         qemu_opt_set(opts, "path", str);
@@ -627,25 +628,53 @@ int unix_connect(const char *path)
 int unix_listen_opts(QemuOpts *opts)
 {
     fprintf(stderr, "unix sockets are not available on windows\n");
+    errno = ENOTSUP;
     return -1;
 }
 
 int unix_connect_opts(QemuOpts *opts)
 {
     fprintf(stderr, "unix sockets are not available on windows\n");
+    errno = ENOTSUP;
     return -1;
 }
 
 int unix_listen(const char *path, char *ostr, int olen)
 {
     fprintf(stderr, "unix sockets are not available on windows\n");
+    errno = ENOTSUP;
     return -1;
 }
 
 int unix_connect(const char *path)
 {
     fprintf(stderr, "unix sockets are not available on windows\n");
+    errno = ENOTSUP;
     return -1;
 }
 
 #endif
+
+#ifdef _WIN32
+static void socket_cleanup(void)
+{
+    WSACleanup();
+}
+#endif
+
+int socket_init(void)
+{
+#ifdef _WIN32
+    WSADATA Data;
+    int ret, err;
+
+    ret = WSAStartup(MAKEWORD(2,0), &Data);
+    if (ret != 0) {
+        err = WSAGetLastError();
+        fprintf(stderr, "WSAStartup: %d\n", err);
+        return -1;
+    }
+    atexit(socket_cleanup);
+#endif
+    return 0;
+}

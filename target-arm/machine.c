@@ -41,8 +41,15 @@ void cpu_save(QEMUFile *f, void *opaque)
     }
     qemu_put_be32(f, env->cp15.c6_insn);
     qemu_put_be32(f, env->cp15.c6_data);
+    qemu_put_be32(f, env->cp15.c7_par);
     qemu_put_be32(f, env->cp15.c9_insn);
     qemu_put_be32(f, env->cp15.c9_data);
+    qemu_put_be32(f, env->cp15.c9_pmcr);
+    qemu_put_be32(f, env->cp15.c9_pmcnten);
+    qemu_put_be32(f, env->cp15.c9_pmovsr);
+    qemu_put_be32(f, env->cp15.c9_pmxevtyper);
+    qemu_put_be32(f, env->cp15.c9_pmuserenr);
+    qemu_put_be32(f, env->cp15.c9_pminten);
     qemu_put_be32(f, env->cp15.c13_fcse);
     qemu_put_be32(f, env->cp15.c13_context);
     qemu_put_be32(f, env->cp15.c13_tls1);
@@ -148,8 +155,15 @@ int cpu_load(QEMUFile *f, void *opaque, int version_id)
     }
     env->cp15.c6_insn = qemu_get_be32(f);
     env->cp15.c6_data = qemu_get_be32(f);
+    env->cp15.c7_par = qemu_get_be32(f);
     env->cp15.c9_insn = qemu_get_be32(f);
     env->cp15.c9_data = qemu_get_be32(f);
+    env->cp15.c9_pmcr = qemu_get_be32(f);
+    env->cp15.c9_pmcnten = qemu_get_be32(f);
+    env->cp15.c9_pmovsr = qemu_get_be32(f);
+    env->cp15.c9_pmxevtyper = qemu_get_be32(f);
+    env->cp15.c9_pmuserenr = qemu_get_be32(f);
+    env->cp15.c9_pminten = qemu_get_be32(f);
     env->cp15.c13_fcse = qemu_get_be32(f);
     env->cp15.c13_context = qemu_get_be32(f);
     env->cp15.c13_tls1 = qemu_get_be32(f);
@@ -175,7 +189,7 @@ int cpu_load(QEMUFile *f, void *opaque, int version_id)
         env->vfp.vec_stride = qemu_get_be32(f);
 
         if (arm_feature(env, ARM_FEATURE_VFP3)) {
-            for (i = 0;  i < 16; i++) {
+            for (i = 16;  i < 32; i++) {
                 CPU_DoubleU u;
                 u.l.upper = qemu_get_be32(f);
                 u.l.lower = qemu_get_be32(f);

@@ -24,7 +24,6 @@
 #include <signal.h>
 
 #include "cpu.h"
-#include "exec-all.h"
 #include "hw/sh_intc.h"
 
 #if defined(CONFIG_USER_ONLY)
@@ -35,7 +34,7 @@ void do_interrupt (CPUState *env)
 }
 
 int cpu_sh4_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
-			     int mmu_idx, int is_softmmu)
+                             int mmu_idx)
 {
     env->tea = address;
     env->exception_index = -1;
@@ -90,11 +89,11 @@ void do_interrupt(CPUState * env)
         if (do_exp && env->exception_index != 0x1e0) {
             env->exception_index = 0x000; /* masked exception -> reset */
         }
-        if (do_irq && !env->intr_at_halt) {
+        if (do_irq && !env->in_sleep) {
             return; /* masked */
         }
-        env->intr_at_halt = 0;
     }
+    env->in_sleep = 0;
 
     if (do_irq) {
         irq_vector = sh_intc_get_pending_vector(env->intc_handle,
@@ -441,7 +440,7 @@ static int get_physical_address(CPUState * env, target_ulong * physical,
 }
 
 int cpu_sh4_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
-			     int mmu_idx, int is_softmmu)
+                             int mmu_idx)
 {
     target_ulong physical;
     int prot, ret, access_type;

@@ -29,21 +29,56 @@
 #include "qemu-timer.h"
 #include "loader.h"
 
-int isa_vga_init(void)
-{
-    VGACommonState *s;
+typedef struct ISAVGAState {
+    ISADevice dev;
+    struct VGACommonState state;
+} ISAVGAState;
 
-    s = qemu_mallocz(sizeof(*s));
+static void vga_reset_isa(DeviceState *dev)
+{
+    ISAVGAState *d = container_of(dev, ISAVGAState, dev.qdev);
+    VGACommonState *s = &d->state;
+
+    vga_common_reset(s);
+}
+
+static int vga_initfn(ISADevice *dev)
+{
+    ISAVGAState *d = DO_UPCAST(ISAVGAState, dev, dev);
+    VGACommonState *s = &d->state;
+    MemoryRegion *vga_io_memory;
+    const MemoryRegionPortio *vga_ports, *vbe_ports;
 
     vga_common_init(s, VGA_RAM_SIZE);
-    vga_init(s);
-    vmstate_register(NULL, 0, &vmstate_vga_common, s);
-
+    s->legacy_address_space = isa_address_space(dev);
+    vga_io_memory = vga_init_io(s, &vga_ports, &vbe_ports);
+    isa_register_portio_list(dev, 0x3b0, vga_ports, s, "vga");
+    if (vbe_ports) {
+        isa_register_portio_list(dev, 0x1ce, vbe_ports, s, "vbe");
+    }
+    memory_region_add_subregion_overlap(isa_address_space(dev),
+                                        isa_mem_base + 0x000a0000,
+                                        vga_io_memory, 1);
+    memory_region_set_coalescing(vga_io_memory);
     s->ds = graphic_console_init(s->update, s->invalidate,
                                  s->screen_dump, s->text_update, s);
 
-    vga_init_vbe(s);
+    vga_init_vbe(s, isa_address_space(dev));
     /* ROM BIOS */
     rom_add_vga(VGABIOS_FILENAME);
     return 0;
 }
+
+static ISADeviceInfo vga_info = {
+    .qdev.name     = "isa-vga",
+    .qdev.size     = sizeof(ISAVGAState),
+    .qdev.vmsd     = &vmstate_vga_common,
+    .qdev.reset     = vga_reset_isa,
+    .init          = vga_initfn,
+};
+
+static void vga_register(void)
+{
+    isa_qdev_register(&vga_info);
+}
+device_init(vga_register)

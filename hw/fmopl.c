@@ -45,6 +45,10 @@
 #define PI 3.14159265358979323846
 #endif
 
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+
 /* -------------------- for debug --------------------- */
 /* #define OPL_OUTPUT_LOG */
 #ifdef OPL_OUTPUT_LOG
@@ -595,14 +599,14 @@ static void init_timetables( FM_OPL *OPL , int ARRATE , int DRRATE )
 		OPL->AR_TABLE[i] = rate / ARRATE;
 		OPL->DR_TABLE[i] = rate / DRRATE;
 	}
-	for (i = 60;i < 76;i++)
+	for (i = 60; i < ARRAY_SIZE(OPL->AR_TABLE); i++)
 	{
 		OPL->AR_TABLE[i] = EG_AED-1;
 		OPL->DR_TABLE[i] = OPL->DR_TABLE[60];
 	}
 #if 0
 	for (i = 0;i < 64 ;i++){	/* make for overflow area */
-		LOG(LOG_WAR,("rate %2d , ar %f ms , dr %f ms \n",i,
+		LOG(LOG_WAR, ("rate %2d , ar %f ms , dr %f ms\n", i,
 			((double)(EG_ENT<<ENV_BITS) / OPL->AR_TABLE[i]) * (1000.0 / OPL->rate),
 			((double)(EG_ENT<<ENV_BITS) / OPL->DR_TABLE[i]) * (1000.0 / OPL->rate) ));
 	}
