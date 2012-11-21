@@ -1,0 +1,279 @@
+From c755c79f081b866d22bd335750328e3b876ffaab Mon Sep 17 00:00:00 2001
+From: Gui Chen <gui.chen@intel.com>
+Date: Tue, 25 Sep 2012 15:28:44 +0800
+Subject: [PATCH] xattr syscall patch
+
+Signed-off-by: Gui Chen <gui.chen@intel.com>
+---
+ configure            |  11 +++-
+ linux-user/syscall.c | 163 +++++++++++++++++++++++++++++++++++++++++++++++++--
+ qemu-xattr.h         |  30 ++++++++++
+ 3 files changed, 199 insertions(+), 5 deletions(-)
+ create mode 100644 qemu-xattr.h
+
+diff --git a/configure b/configure
+index f2551b3..cd307a6 100755
+--- a/configure
++++ b/configure
+@@ -128,6 +128,7 @@ vnc_thread="no"
+ xen=""
+ linux_aio=""
+ attr=""
++libattr=""
+ vhost_net=""
+ xfs=""
+ 
+@@ -1858,12 +1859,20 @@ if test "$attr" != "no" ; then
+   cat > $TMPC <<EOF
+ #include <stdio.h>
+ #include <sys/types.h>
++#ifdef CONFIG_LIBATTR
+ #include <attr/xattr.h>
++#else
++#include <sys/xattr.h>
++#endif
+ int main(void) { getxattr(NULL, NULL, NULL, 0); setxattr(NULL, NULL, NULL, 0, 0); return 0; }
+ EOF
+-  if compile_prog "" "-lattr" ; then
++  if compile_prog "" "" ; then
++    attr=yes
++  # Older distros have <attr/xattr.h>, and need -lattr:
++  elif compile_prog "-DCONFIG_LIBATTR" "-lattr" ; then
+     attr=yes
+     LIBS="-lattr $LIBS"
++    libattr=yes
+   else
+     if test "$attr" = "yes" ; then
+       feature_not_found "ATTR"
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index 499c4d7..794e6af 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -66,6 +66,9 @@ int __clone2(int (*fn)(void *), void *child_stack_base,
+ #ifdef CONFIG_EVENTFD
+ #include <sys/eventfd.h>
+ #endif
++#ifdef CONFIG_ATTR
++#include "qemu-xattr.h"
++#endif
+ 
+ #define termios host_termios
+ #define winsize host_winsize
+@@ -7175,22 +7178,174 @@ abi_long do_syscall(void *cpu_env, int num, abi_long arg1,
+ #endif
+         break;
+ #endif
++#ifdef CONFIG_ATTR
+ #ifdef TARGET_NR_setxattr
++    case TARGET_NR_listxattr:
++    case TARGET_NR_llistxattr:
++    {
++        void *p, *b = 0;
++        if (arg2) {
++            b = lock_user(VERIFY_WRITE, arg2, arg3, 0);
++            if (!b) {
++                ret = -TARGET_EFAULT;
++                break;
++            }
++        }
++        p = lock_user_string(arg1);
++        if (p) {
++            if (num == TARGET_NR_listxattr) {
++                ret = get_errno(listxattr(p, b, arg3));
++            } else {
++                ret = get_errno(llistxattr(p, b, arg3));
++            }
++        } else {
++            ret = -TARGET_EFAULT;
++        }
++        unlock_user(p, arg1, 0);
++        unlock_user(b, arg2, arg3);
++        break;
++    }
++    case TARGET_NR_flistxattr:
++    {
++        void *b = 0;
++        if (arg2) {
++            b = lock_user(VERIFY_WRITE, arg2, arg3, 0);
++            if (!b) {
++                ret = -TARGET_EFAULT;
++                break;
++            }
++        }
++        ret = get_errno(flistxattr(arg1, b, arg3));
++        unlock_user(b, arg2, arg3);
++        break;
++    }
+     case TARGET_NR_setxattr:
+     case TARGET_NR_lsetxattr:
++        {
++            void *p, *n, *v = 0;
++            if (arg3) {
++                v = lock_user(VERIFY_READ, arg3, arg4, 1);
++                if (!v) {
++                    ret = -TARGET_EFAULT;
++                    break;
++                }
++            }
++            p = lock_user_string(arg1);
++            n = lock_user_string(arg2);
++            if (p && n) {
++                if (num == TARGET_NR_setxattr) {
++                    ret = get_errno(setxattr(p, n, v, arg4, arg5));
++                } else {
++                    ret = get_errno(lsetxattr(p, n, v, arg4, arg5));
++                }
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(p, arg1, 0);
++            unlock_user(n, arg2, 0);
++            unlock_user(v, arg3, 0);
++        }
++        break;
+     case TARGET_NR_fsetxattr:
++        {
++            void *n, *v = 0;
++            if (arg3) {
++                v = lock_user(VERIFY_READ, arg3, arg4, 1);
++                if (!v) {
++                    ret = -TARGET_EFAULT;
++                    break;
++                }
++            }
++            n = lock_user_string(arg2);
++            if (n) {
++                ret = get_errno(fsetxattr(arg1, n, v, arg4, arg5));
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(n, arg2, 0);
++            unlock_user(v, arg3, 0);
++        }
++        break;
+     case TARGET_NR_getxattr:
+     case TARGET_NR_lgetxattr:
++        {
++            void *p, *n, *v = 0;
++            if (arg3) {
++                v = lock_user(VERIFY_WRITE, arg3, arg4, 0);
++                if (!v) {
++                    ret = -TARGET_EFAULT;
++                    break;
++                }
++            }
++            p = lock_user_string(arg1);
++            n = lock_user_string(arg2);
++            if (p && n) {
++                if (num == TARGET_NR_getxattr) {
++                    ret = get_errno(getxattr(p, n, v, arg4));
++                } else {
++                    ret = get_errno(lgetxattr(p, n, v, arg4));
++                }
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(p, arg1, 0);
++            unlock_user(n, arg2, 0);
++            unlock_user(v, arg3, arg4);
++        }
++        break;
+     case TARGET_NR_fgetxattr:
+-    case TARGET_NR_listxattr:
+-    case TARGET_NR_llistxattr:
+-    case TARGET_NR_flistxattr:
++        {
++            void *n, *v = 0;
++            if (arg3) {
++                v = lock_user(VERIFY_WRITE, arg3, arg4, 0);
++                if (!v) {
++                    ret = -TARGET_EFAULT;
++                    break;
++                }
++            }
++            n = lock_user_string(arg2);
++            if (n) {
++                ret = get_errno(fgetxattr(arg1, n, v, arg4));
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(n, arg2, 0);
++            unlock_user(v, arg3, arg4);
++        }
++        break;
+     case TARGET_NR_removexattr:
+     case TARGET_NR_lremovexattr:
++        {
++            void *p, *n;
++            p = lock_user_string(arg1);
++            n = lock_user_string(arg2);
++            if (p && n) {
++                if (num == TARGET_NR_removexattr) {
++                    ret = get_errno(removexattr(p, n));
++                } else {
++                    ret = get_errno(lremovexattr(p, n));
++                }
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(p, arg1, 0);
++            unlock_user(n, arg2, 0);
++        }
++        break;
+     case TARGET_NR_fremovexattr:
+-        ret = -TARGET_EOPNOTSUPP;
++        {
++            void *n;
++            n = lock_user_string(arg2);
++            if (n) {
++                ret = get_errno(fremovexattr(arg1, n));
++            } else {
++                ret = -TARGET_EFAULT;
++            }
++            unlock_user(n, arg2, 0);
++        }
+         break;
+ #endif
++#endif /* CONFIG_ATTR */
+ #ifdef TARGET_NR_set_thread_area
+     case TARGET_NR_set_thread_area:
+ #if defined(TARGET_MIPS)
+diff --git a/qemu-xattr.h b/qemu-xattr.h
+new file mode 100644
+index 0000000..f910d96
+--- /dev/null
++++ b/qemu-xattr.h
+@@ -0,0 +1,30 @@
++/*
++ * Host xattr.h abstraction
++ *
++ * Copyright 2011 Red Hat Inc. and/or its affiliates
++ *
++ * Authors:
++ *  Avi Kivity <avi@redhat.com>
++ *
++ * This work is licensed under the terms of the GNU GPL, version 2, or any
++ * later version.  See the COPYING file in the top-level directory.
++ *
++ */
++#ifndef QEMU_XATTR_H
++#define QEMU_XATTR_H
++
++/*
++ * Modern distributions (e.g. Fedora 15, have no libattr.so, place attr.h
++ * in /usr/include/sys, and don't have ENOATTR.
++ */
++
++#include "config-host.h"
++
++#ifdef CONFIG_LIBATTR
++#  include <attr/xattr.h>
++#else
++#  define ENOATTR ENODATA
++#  include <sys/xattr.h>
++#endif
++
++#endif
+-- 
+1.7.11.2
+

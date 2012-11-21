@@ -6,6 +6,7 @@ Summary:        Static Qemu for Arm
 Version:        0.14.1
 Release:        1
 Source:         qemu-%version.tar.gz
+Patch0:         xattr-syscall.patch
 BuildRoot:      %{_tmppath}/%{name}-%{version}-build
 
 BuildRequires:  eglibc-static  
@@ -29,6 +30,7 @@ Authors:
 
 %prep
 %setup -q -n qemu-%version
+%patch0 -p1
 
 %build
 export RPM_OPT_FLAGS=${RPM_OPT_FLAGS//-fno-omit-frame-pointer/-fomit-frame-pointer}
