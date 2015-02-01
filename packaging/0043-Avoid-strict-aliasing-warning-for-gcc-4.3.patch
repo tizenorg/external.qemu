@@ -1,0 +1,25 @@
+From: Bo Yang <boyang@suse.com>
+Date: Wed, 20 Mar 2013 16:34:17 +0800
+Subject: Avoid strict-aliasing warning for gcc 4.3
+
+Signed-off-by: Bo Yang <boyang@suse.com>
+Signed-off-by: Michael Brown <mcb30@ipxe.org>
+---
+ roms/ipxe/src/arch/i386/include/bits/byteswap.h | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/roms/ipxe/src/arch/i386/include/bits/byteswap.h b/roms/ipxe/src/arch/i386/include/bits/byteswap.h
+index f3d30a2..0d9cb96 100644
+--- a/roms/ipxe/src/arch/i386/include/bits/byteswap.h
++++ b/roms/ipxe/src/arch/i386/include/bits/byteswap.h
+@@ -53,8 +53,8 @@ __bswap_variable_64 ( uint64_t x ) {
+ static inline __attribute__ (( always_inline )) void
+ __bswap_64s ( uint64_t *x ) {
+ 	struct {
+-		uint32_t low;
+-		uint32_t high;
++		uint32_t __attribute__ (( may_alias )) low;
++		uint32_t __attribute__ (( may_alias )) high;
+ 	} __attribute__ (( may_alias )) *dwords = ( ( void * ) x );
+ 	uint32_t discard;
+ 

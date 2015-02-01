@@ -9,24 +9,27 @@
  * This work is licensed under the terms of the GNU GPL, version 2.  See
  * the COPYING file in the top-level directory.
  *
+ * Contributions after 2012-01-13 are licensed under the terms of the
+ * GNU GPL, version 2 or (at your option) any later version.
  */
 
 #include "qemu-common.h"
-#include "block_int.h"
+#include "block/block_int.h"
 #include "hw/hw.h"
-#include "qemu-queue.h"
-#include "qemu-timer.h"
-#include "monitor.h"
-#include "block-migration.h"
-#include "migration.h"
-#include "blockdev.h"
+#include "qemu/queue.h"
+#include "qemu/timer.h"
+#include "migration/block.h"
+#include "migration/migration.h"
+#include "sysemu/blockdev.h"
 #include <assert.h>
 
-#define BLOCK_SIZE (BDRV_SECTORS_PER_DIRTY_CHUNK << BDRV_SECTOR_BITS)
+#define BLOCK_SIZE                       (1 << 20)
+#define BDRV_SECTORS_PER_DIRTY_CHUNK     (BLOCK_SIZE >> BDRV_SECTOR_BITS)
 
 #define BLK_MIG_FLAG_DEVICE_BLOCK       0x01
 #define BLK_MIG_FLAG_EOS                0x02
 #define BLK_MIG_FLAG_PROGRESS           0x04
+#define BLK_MIG_FLAG_ZERO_BLOCK         0x08
 
 #define MAX_IS_ALLOCATED_SEARCH 65536
 
@@ -41,19 +44,24 @@
 #endif
 
 typedef struct BlkMigDevState {
+    /* Written during setup phase.  Can be read without a lock.  */
     BlockDriverState *bs;
-    int bulk_completed;
     int shared_base;
+    int64_t total_sectors;
+    QSIMPLEQ_ENTRY(BlkMigDevState) entry;
+
+    /* Only used by migration thread.  Does not need a lock.  */
+    int bulk_completed;
     int64_t cur_sector;
     int64_t cur_dirty;
-    int64_t completed_sectors;
-    int64_t total_sectors;
-    int64_t dirty;
-    QSIMPLEQ_ENTRY(BlkMigDevState) entry;
+
+    /* Protected by block migration lock.  */
     unsigned long *aio_bitmap;
+    int64_t completed_sectors;
 } BlkMigDevState;
 
 typedef struct BlkMigBlock {
+    /* Only used by migration thread.  */
     uint8_t *buf;
     BlkMigDevState *bmds;
     int64_t sector;
@@ -61,40 +69,76 @@ typedef struct BlkMigBlock {
     struct iovec iov;
     QEMUIOVector qiov;
     BlockDriverAIOCB *aiocb;
+
+    /* Protected by block migration lock.  */
     int ret;
-    int64_t time;
     QSIMPLEQ_ENTRY(BlkMigBlock) entry;
 } BlkMigBlock;
 
 typedef struct BlkMigState {
+    /* Written during setup phase.  Can be read without a lock.  */
     int blk_enable;
     int shared_base;
     QSIMPLEQ_HEAD(bmds_list, BlkMigDevState) bmds_list;
+    int64_t total_sector_sum;
+    bool zero_blocks;
+
+    /* Protected by lock.  */
     QSIMPLEQ_HEAD(blk_list, BlkMigBlock) blk_list;
     int submitted;
     int read_done;
+
+    /* Only used by migration thread.  Does not need a lock.  */
     int transferred;
-    int64_t total_sector_sum;
     int prev_progress;
     int bulk_completed;
-    long double total_time;
-    int reads;
+
+    /* Lock must be taken _inside_ the iothread lock.  */
+    QemuMutex lock;
 } BlkMigState;
 
 static BlkMigState block_mig_state;
 
+static void blk_mig_lock(void)
+{
+    qemu_mutex_lock(&block_mig_state.lock);
+}
+
+static void blk_mig_unlock(void)
+{
+    qemu_mutex_unlock(&block_mig_state.lock);
+}
+
+/* Must run outside of the iothread lock during the bulk phase,
+ * or the VM will stall.
+ */
+
 static void blk_send(QEMUFile *f, BlkMigBlock * blk)
 {
     int len;
+    uint64_t flags = BLK_MIG_FLAG_DEVICE_BLOCK;
+
+    if (block_mig_state.zero_blocks &&
+        buffer_is_zero(blk->buf, BLOCK_SIZE)) {
+        flags |= BLK_MIG_FLAG_ZERO_BLOCK;
+    }
 
     /* sector number and flags */
     qemu_put_be64(f, (blk->sector << BDRV_SECTOR_BITS)
-                     | BLK_MIG_FLAG_DEVICE_BLOCK);
+                     | flags);
 
     /* device name */
     len = strlen(blk->bmds->bs->device_name);
     qemu_put_byte(f, len);
     qemu_put_buffer(f, (uint8_t *)blk->bmds->bs->device_name, len);
+
+    /* if a block is zero we need to flush here since the network
+     * bandwidth is now a lot higher than the storage device bandwidth.
+     * thus if we queue zero blocks we slow down the migration */
+    if (flags & BLK_MIG_FLAG_ZERO_BLOCK) {
+        qemu_fflush(f);
+        return;
+    }
 
     qemu_put_buffer(f, blk->buf, BLOCK_SIZE);
 }
@@ -109,9 +153,11 @@ uint64_t blk_mig_bytes_transferred(void)
     BlkMigDevState *bmds;
     uint64_t sum = 0;
 
+    blk_mig_lock();
     QSIMPLEQ_FOREACH(bmds, &block_mig_state.bmds_list, entry) {
         sum += bmds->completed_sectors;
     }
+    blk_mig_unlock();
     return sum << BDRV_SECTOR_BITS;
 }
 
@@ -131,17 +177,8 @@ uint64_t blk_mig_bytes_total(void)
     return sum << BDRV_SECTOR_BITS;
 }
 
-static inline void add_avg_read_time(int64_t time)
-{
-    block_mig_state.reads++;
-    block_mig_state.total_time += time;
-}
 
-static inline long double compute_read_bwidth(void)
-{
-    assert(block_mig_state.total_time != 0);
-    return  (block_mig_state.reads * BLOCK_SIZE)/ block_mig_state.total_time;
-}
+/* Called with migration lock held.  */
 
 static int bmds_aio_inflight(BlkMigDevState *bmds, int64_t sector)
 {
@@ -154,6 +191,8 @@ static int bmds_aio_inflight(BlkMigDevState *bmds, int64_t sector)
         return 0;
     }
 }
+
+/* Called with migration lock held.  */
 
 static void bmds_set_aio_inflight(BlkMigDevState *bmds, int64_t sector_num,
                              int nb_sectors, int set)
@@ -186,18 +225,17 @@ static void alloc_aio_bitmap(BlkMigDevState *bmds)
             BDRV_SECTORS_PER_DIRTY_CHUNK * 8 - 1;
     bitmap_size /= BDRV_SECTORS_PER_DIRTY_CHUNK * 8;
 
-    bmds->aio_bitmap = qemu_mallocz(bitmap_size);
+    bmds->aio_bitmap = g_malloc0(bitmap_size);
 }
+
+/* Never hold migration lock when yielding to the main loop!  */
 
 static void blk_mig_read_cb(void *opaque, int ret)
 {
     BlkMigBlock *blk = opaque;
 
+    blk_mig_lock();
     blk->ret = ret;
-
-    blk->time = qemu_get_clock_ns(rt_clock) - blk->time;
-
-    add_avg_read_time(blk->time);
 
     QSIMPLEQ_INSERT_TAIL(&block_mig_state.blk_list, blk, entry);
     bmds_set_aio_inflight(blk->bmds, blk->sector, blk->nr_sectors, 0);
@@ -205,10 +243,12 @@ static void blk_mig_read_cb(void *opaque, int ret)
     block_mig_state.submitted--;
     block_mig_state.read_done++;
     assert(block_mig_state.submitted >= 0);
+    blk_mig_unlock();
 }
 
-static int mig_save_device_bulk(Monitor *mon, QEMUFile *f,
-                                BlkMigDevState *bmds)
+/* Called with no lock taken.  */
+
+static int mig_save_device_bulk(QEMUFile *f, BlkMigDevState *bmds)
 {
     int64_t total_sectors = bmds->total_sectors;
     int64_t cur_sector = bmds->cur_sector;
@@ -217,11 +257,13 @@ static int mig_save_device_bulk(Monitor *mon, QEMUFile *f,
     int nr_sectors;
 
     if (bmds->shared_base) {
+        qemu_mutex_lock_iothread();
         while (cur_sector < total_sectors &&
                !bdrv_is_allocated(bs, cur_sector, MAX_IS_ALLOCATED_SEARCH,
                                   &nr_sectors)) {
             cur_sector += nr_sectors;
         }
+        qemu_mutex_unlock_iothread();
     }
 
     if (cur_sector >= total_sectors) {
@@ -240,8 +282,8 @@ static int mig_save_device_bulk(Monitor *mon, QEMUFile *f,
         nr_sectors = total_sectors - cur_sector;
     }
 
-    blk = qemu_malloc(sizeof(BlkMigBlock));
-    blk->buf = qemu_malloc(BLOCK_SIZE);
+    blk = g_malloc(sizeof(BlkMigBlock));
+    blk->buf = g_malloc(BLOCK_SIZE);
     blk->bmds = bmds;
     blk->sector = cur_sector;
     blk->nr_sectors = nr_sectors;
@@ -250,40 +292,34 @@ static int mig_save_device_bulk(Monitor *mon, QEMUFile *f,
     blk->iov.iov_len = nr_sectors * BDRV_SECTOR_SIZE;
     qemu_iovec_init_external(&blk->qiov, &blk->iov, 1);
 
-    blk->time = qemu_get_clock_ns(rt_clock);
+    blk_mig_lock();
+    block_mig_state.submitted++;
+    blk_mig_unlock();
 
+    qemu_mutex_lock_iothread();
     blk->aiocb = bdrv_aio_readv(bs, cur_sector, &blk->qiov,
                                 nr_sectors, blk_mig_read_cb, blk);
-    if (!blk->aiocb) {
-        goto error;
-    }
-    block_mig_state.submitted++;
 
     bdrv_reset_dirty(bs, cur_sector, nr_sectors);
+    qemu_mutex_unlock_iothread();
+
     bmds->cur_sector = cur_sector + nr_sectors;
-
     return (bmds->cur_sector >= total_sectors);
-
-error:
-    monitor_printf(mon, "Error reading sector %" PRId64 "\n", cur_sector);
-    qemu_file_set_error(f);
-    qemu_free(blk->buf);
-    qemu_free(blk);
-    return 0;
 }
+
+/* Called with iothread lock taken.  */
 
 static void set_dirty_tracking(int enable)
 {
     BlkMigDevState *bmds;
 
     QSIMPLEQ_FOREACH(bmds, &block_mig_state.bmds_list, entry) {
-        bdrv_set_dirty_tracking(bmds->bs, enable);
+        bdrv_set_dirty_tracking(bmds->bs, enable ? BLOCK_SIZE : 0);
     }
 }
 
 static void init_blk_migration_it(void *opaque, BlockDriverState *bs)
 {
-    Monitor *mon = opaque;
     BlkMigDevState *bmds;
     int64_t sectors;
 
@@ -293,7 +329,7 @@ static void init_blk_migration_it(void *opaque, BlockDriverState *bs)
             return;
         }
 
-        bmds = qemu_mallocz(sizeof(BlkMigDevState));
+        bmds = g_malloc0(sizeof(BlkMigDevState));
         bmds->bs = bs;
         bmds->bulk_completed = 0;
         bmds->total_sectors = sectors;
@@ -306,19 +342,17 @@ static void init_blk_migration_it(void *opaque, BlockDriverState *bs)
         block_mig_state.total_sector_sum += sectors;
 
         if (bmds->shared_base) {
-            monitor_printf(mon, "Start migration for %s with shared base "
-                                "image\n",
-                           bs->device_name);
+            DPRINTF("Start migration for %s with shared base image\n",
+                    bs->device_name);
         } else {
-            monitor_printf(mon, "Start full migration for %s\n",
-                           bs->device_name);
+            DPRINTF("Start full migration for %s\n", bs->device_name);
         }
 
         QSIMPLEQ_INSERT_TAIL(&block_mig_state.bmds_list, bmds, entry);
     }
 }
 
-static void init_blk_migration(Monitor *mon, QEMUFile *f)
+static void init_blk_migration(QEMUFile *f)
 {
     block_mig_state.submitted = 0;
     block_mig_state.read_done = 0;
@@ -326,13 +360,14 @@ static void init_blk_migration(Monitor *mon, QEMUFile *f)
     block_mig_state.total_sector_sum = 0;
     block_mig_state.prev_progress = -1;
     block_mig_state.bulk_completed = 0;
-    block_mig_state.total_time = 0;
-    block_mig_state.reads = 0;
+    block_mig_state.zero_blocks = migrate_zero_blocks();
 
-    bdrv_iterate(init_blk_migration_it, mon);
+    bdrv_iterate(init_blk_migration_it, NULL);
 }
 
-static int blk_mig_save_bulked_block(Monitor *mon, QEMUFile *f)
+/* Called with no lock taken.  */
+
+static int blk_mig_save_bulked_block(QEMUFile *f)
 {
     int64_t completed_sector_sum = 0;
     BlkMigDevState *bmds;
@@ -341,7 +376,7 @@ static int blk_mig_save_bulked_block(Monitor *mon, QEMUFile *f)
 
     QSIMPLEQ_FOREACH(bmds, &block_mig_state.bmds_list, entry) {
         if (bmds->bulk_completed == 0) {
-            if (mig_save_device_bulk(mon, f, bmds) == 1) {
+            if (mig_save_device_bulk(f, bmds) == 1) {
                 /* completed bulk section for this device */
                 bmds->bulk_completed = 1;
             }
@@ -363,8 +398,7 @@ static int blk_mig_save_bulked_block(Monitor *mon, QEMUFile *f)
         block_mig_state.prev_progress = progress;
         qemu_put_be64(f, (progress << BDRV_SECTOR_BITS)
                          | BLK_MIG_FLAG_PROGRESS);
-        monitor_printf(mon, "Completed %d %%\r", progress);
-        monitor_flush(mon);
+        DPRINTF("Completed %d %%\r", progress);
     }
 
     return ret;
@@ -379,17 +413,24 @@ static void blk_mig_reset_dirty_cursor(void)
     }
 }
 
-static int mig_save_device_dirty(Monitor *mon, QEMUFile *f,
-                                 BlkMigDevState *bmds, int is_async)
+/* Called with iothread lock taken.  */
+
+static int mig_save_device_dirty(QEMUFile *f, BlkMigDevState *bmds,
+                                 int is_async)
 {
     BlkMigBlock *blk;
     int64_t total_sectors = bmds->total_sectors;
     int64_t sector;
     int nr_sectors;
+    int ret = -EIO;
 
     for (sector = bmds->cur_dirty; sector < bmds->total_sectors;) {
+        blk_mig_lock();
         if (bmds_aio_inflight(bmds, sector)) {
-            qemu_aio_flush();
+            blk_mig_unlock();
+            bdrv_drain_all();
+        } else {
+            blk_mig_unlock();
         }
         if (bdrv_get_dirty(bmds->bs, sector)) {
 
@@ -398,8 +439,8 @@ static int mig_save_device_dirty(Monitor *mon, QEMUFile *f,
             } else {
                 nr_sectors = BDRV_SECTORS_PER_DIRTY_CHUNK;
             }
-            blk = qemu_malloc(sizeof(BlkMigBlock));
-            blk->buf = qemu_malloc(BLOCK_SIZE);
+            blk = g_malloc(sizeof(BlkMigBlock));
+            blk->buf = g_malloc(BLOCK_SIZE);
             blk->bmds = bmds;
             blk->sector = sector;
             blk->nr_sectors = nr_sectors;
@@ -409,24 +450,22 @@ static int mig_save_device_dirty(Monitor *mon, QEMUFile *f,
                 blk->iov.iov_len = nr_sectors * BDRV_SECTOR_SIZE;
                 qemu_iovec_init_external(&blk->qiov, &blk->iov, 1);
 
-                blk->time = qemu_get_clock_ns(rt_clock);
-
                 blk->aiocb = bdrv_aio_readv(bmds->bs, sector, &blk->qiov,
                                             nr_sectors, blk_mig_read_cb, blk);
-                if (!blk->aiocb) {
-                    goto error;
-                }
+
+                blk_mig_lock();
                 block_mig_state.submitted++;
                 bmds_set_aio_inflight(bmds, sector, nr_sectors, 1);
+                blk_mig_unlock();
             } else {
-                if (bdrv_read(bmds->bs, sector, blk->buf,
-                              nr_sectors) < 0) {
+                ret = bdrv_read(bmds->bs, sector, blk->buf, nr_sectors);
+                if (ret < 0) {
                     goto error;
                 }
                 blk_send(f, blk);
 
-                qemu_free(blk->buf);
-                qemu_free(blk);
+                g_free(blk->buf);
+                g_free(blk);
             }
 
             bdrv_reset_dirty(bmds->bs, sector, nr_sectors);
@@ -439,21 +478,26 @@ static int mig_save_device_dirty(Monitor *mon, QEMUFile *f,
     return (bmds->cur_dirty >= bmds->total_sectors);
 
 error:
-    monitor_printf(mon, "Error reading sector %" PRId64 "\n", sector);
-    qemu_file_set_error(f);
-    qemu_free(blk->buf);
-    qemu_free(blk);
-    return 0;
+    DPRINTF("Error reading sector %" PRId64 "\n", sector);
+    g_free(blk->buf);
+    g_free(blk);
+    return ret;
 }
 
-static int blk_mig_save_dirty_block(Monitor *mon, QEMUFile *f, int is_async)
+/* Called with iothread lock taken.
+ *
+ * return value:
+ * 0: too much data for max_downtime
+ * 1: few enough data for max_downtime
+*/
+static int blk_mig_save_dirty_block(QEMUFile *f, int is_async)
 {
     BlkMigDevState *bmds;
-    int ret = 0;
+    int ret = 1;
 
     QSIMPLEQ_FOREACH(bmds, &block_mig_state.bmds_list, entry) {
-        if (mig_save_device_dirty(mon, f, bmds, is_async) == 0) {
-            ret = 1;
+        ret = mig_save_device_dirty(f, bmds, is_async);
+        if (ret <= 0) {
             break;
         }
     }
@@ -461,37 +505,48 @@ static int blk_mig_save_dirty_block(Monitor *mon, QEMUFile *f, int is_async)
     return ret;
 }
 
-static void flush_blks(QEMUFile* f)
+/* Called with no locks taken.  */
+
+static int flush_blks(QEMUFile *f)
 {
     BlkMigBlock *blk;
+    int ret = 0;
 
     DPRINTF("%s Enter submitted %d read_done %d transferred %d\n",
             __FUNCTION__, block_mig_state.submitted, block_mig_state.read_done,
             block_mig_state.transferred);
 
+    blk_mig_lock();
     while ((blk = QSIMPLEQ_FIRST(&block_mig_state.blk_list)) != NULL) {
         if (qemu_file_rate_limit(f)) {
             break;
         }
         if (blk->ret < 0) {
-            qemu_file_set_error(f);
+            ret = blk->ret;
             break;
         }
-        blk_send(f, blk);
 
         QSIMPLEQ_REMOVE_HEAD(&block_mig_state.blk_list, entry);
-        qemu_free(blk->buf);
-        qemu_free(blk);
+        blk_mig_unlock();
+        blk_send(f, blk);
+        blk_mig_lock();
+
+        g_free(blk->buf);
+        g_free(blk);
 
         block_mig_state.read_done--;
         block_mig_state.transferred++;
         assert(block_mig_state.read_done >= 0);
     }
+    blk_mig_unlock();
 
     DPRINTF("%s Exit submitted %d read_done %d transferred %d\n", __FUNCTION__,
             block_mig_state.submitted, block_mig_state.read_done,
             block_mig_state.transferred);
+    return ret;
 }
+
+/* Called with iothread lock taken.  */
 
 static int64_t get_remaining_dirty(void)
 {
@@ -502,139 +557,179 @@ static int64_t get_remaining_dirty(void)
         dirty += bdrv_get_dirty_count(bmds->bs);
     }
 
-    return dirty * BLOCK_SIZE;
+    return dirty << BDRV_SECTOR_BITS;
 }
 
-static int is_stage2_completed(void)
-{
-    int64_t remaining_dirty;
-    long double bwidth;
+/* Called with iothread lock taken.  */
 
-    if (block_mig_state.bulk_completed == 1) {
-
-        remaining_dirty = get_remaining_dirty();
-        if (remaining_dirty == 0) {
-            return 1;
-        }
-
-        bwidth = compute_read_bwidth();
-
-        if ((remaining_dirty / bwidth) <=
-            migrate_max_downtime()) {
-            /* finish stage2 because we think that we can finish remaing work
-               below max_downtime */
-
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-static void blk_mig_cleanup(Monitor *mon)
+static void blk_mig_cleanup(void)
 {
     BlkMigDevState *bmds;
     BlkMigBlock *blk;
 
+    bdrv_drain_all();
+
     set_dirty_tracking(0);
 
+    blk_mig_lock();
     while ((bmds = QSIMPLEQ_FIRST(&block_mig_state.bmds_list)) != NULL) {
         QSIMPLEQ_REMOVE_HEAD(&block_mig_state.bmds_list, entry);
         bdrv_set_in_use(bmds->bs, 0);
         drive_put_ref(drive_get_by_blockdev(bmds->bs));
-        qemu_free(bmds->aio_bitmap);
-        qemu_free(bmds);
+        g_free(bmds->aio_bitmap);
+        g_free(bmds);
     }
 
     while ((blk = QSIMPLEQ_FIRST(&block_mig_state.blk_list)) != NULL) {
         QSIMPLEQ_REMOVE_HEAD(&block_mig_state.blk_list, entry);
-        qemu_free(blk->buf);
-        qemu_free(blk);
+        g_free(blk->buf);
+        g_free(blk);
     }
-
-    monitor_printf(mon, "\n");
+    blk_mig_unlock();
 }
 
-static int block_save_live(Monitor *mon, QEMUFile *f, int stage, void *opaque)
+static void block_migration_cancel(void *opaque)
 {
-    DPRINTF("Enter save live stage %d submitted %d transferred %d\n",
-            stage, block_mig_state.submitted, block_mig_state.transferred);
+    blk_mig_cleanup();
+}
 
-    if (stage < 0) {
-        blk_mig_cleanup(mon);
-        return 0;
-    }
+static int block_save_setup(QEMUFile *f, void *opaque)
+{
+    int ret;
 
-    if (block_mig_state.blk_enable != 1) {
-        /* no need to migrate storage */
-        qemu_put_be64(f, BLK_MIG_FLAG_EOS);
-        return 1;
-    }
+    DPRINTF("Enter save live setup submitted %d transferred %d\n",
+            block_mig_state.submitted, block_mig_state.transferred);
 
-    if (stage == 1) {
-        init_blk_migration(mon, f);
+    qemu_mutex_lock_iothread();
+    init_blk_migration(f);
 
-        /* start track dirty blocks */
-        set_dirty_tracking(1);
-    }
+    /* start track dirty blocks */
+    set_dirty_tracking(1);
+    qemu_mutex_unlock_iothread();
 
-    flush_blks(f);
+    ret = flush_blks(f);
+    blk_mig_reset_dirty_cursor();
+    qemu_put_be64(f, BLK_MIG_FLAG_EOS);
 
-    if (qemu_file_has_error(f)) {
-        blk_mig_cleanup(mon);
-        return 0;
+    return ret;
+}
+
+static int block_save_iterate(QEMUFile *f, void *opaque)
+{
+    int ret;
+    int64_t last_ftell = qemu_ftell(f);
+
+    DPRINTF("Enter save live iterate submitted %d transferred %d\n",
+            block_mig_state.submitted, block_mig_state.transferred);
+
+    ret = flush_blks(f);
+    if (ret) {
+        return ret;
     }
 
     blk_mig_reset_dirty_cursor();
 
-    if (stage == 2) {
-        /* control the rate of transfer */
-        while ((block_mig_state.submitted +
-                block_mig_state.read_done) * BLOCK_SIZE <
-               qemu_file_get_rate_limit(f)) {
-            if (block_mig_state.bulk_completed == 0) {
-                /* first finish the bulk phase */
-                if (blk_mig_save_bulked_block(mon, f) == 0) {
-                    /* finished saving bulk on all devices */
-                    block_mig_state.bulk_completed = 1;
-                }
-            } else {
-                if (blk_mig_save_dirty_block(mon, f, 1) == 0) {
-                    /* no more dirty blocks */
-                    break;
-                }
+    /* control the rate of transfer */
+    blk_mig_lock();
+    while ((block_mig_state.submitted +
+            block_mig_state.read_done) * BLOCK_SIZE <
+           qemu_file_get_rate_limit(f)) {
+        blk_mig_unlock();
+        if (block_mig_state.bulk_completed == 0) {
+            /* first finish the bulk phase */
+            if (blk_mig_save_bulked_block(f) == 0) {
+                /* finished saving bulk on all devices */
+                block_mig_state.bulk_completed = 1;
             }
+            ret = 0;
+        } else {
+            /* Always called with iothread lock taken for
+             * simplicity, block_save_complete also calls it.
+             */
+            qemu_mutex_lock_iothread();
+            ret = blk_mig_save_dirty_block(f, 1);
+            qemu_mutex_unlock_iothread();
         }
-
-        flush_blks(f);
-
-        if (qemu_file_has_error(f)) {
-            blk_mig_cleanup(mon);
-            return 0;
+        if (ret < 0) {
+            return ret;
+        }
+        blk_mig_lock();
+        if (ret != 0) {
+            /* no more dirty blocks */
+            break;
         }
     }
+    blk_mig_unlock();
 
-    if (stage == 3) {
-        /* we know for sure that save bulk is completed and
-           all async read completed */
-        assert(block_mig_state.submitted == 0);
-
-        while (blk_mig_save_dirty_block(mon, f, 0) != 0);
-        blk_mig_cleanup(mon);
-
-        /* report completion */
-        qemu_put_be64(f, (100 << BDRV_SECTOR_BITS) | BLK_MIG_FLAG_PROGRESS);
-
-        if (qemu_file_has_error(f)) {
-            return 0;
-        }
-
-        monitor_printf(mon, "Block migration completed\n");
+    ret = flush_blks(f);
+    if (ret) {
+        return ret;
     }
 
     qemu_put_be64(f, BLK_MIG_FLAG_EOS);
+    return qemu_ftell(f) - last_ftell;
+}
 
-    return ((stage == 2) && is_stage2_completed());
+/* Called with iothread lock taken.  */
+
+static int block_save_complete(QEMUFile *f, void *opaque)
+{
+    int ret;
+
+    DPRINTF("Enter save live complete submitted %d transferred %d\n",
+            block_mig_state.submitted, block_mig_state.transferred);
+
+    ret = flush_blks(f);
+    if (ret) {
+        return ret;
+    }
+
+    blk_mig_reset_dirty_cursor();
+
+    /* we know for sure that save bulk is completed and
+       all async read completed */
+    blk_mig_lock();
+    assert(block_mig_state.submitted == 0);
+    blk_mig_unlock();
+
+    do {
+        ret = blk_mig_save_dirty_block(f, 0);
+        if (ret < 0) {
+            return ret;
+        }
+    } while (ret == 0);
+
+    /* report completion */
+    qemu_put_be64(f, (100 << BDRV_SECTOR_BITS) | BLK_MIG_FLAG_PROGRESS);
+
+    DPRINTF("Block migration completed\n");
+
+    qemu_put_be64(f, BLK_MIG_FLAG_EOS);
+
+    blk_mig_cleanup();
+    return 0;
+}
+
+static uint64_t block_save_pending(QEMUFile *f, void *opaque, uint64_t max_size)
+{
+    /* Estimate pending number of bytes to send */
+    uint64_t pending;
+
+    qemu_mutex_lock_iothread();
+    blk_mig_lock();
+    pending = get_remaining_dirty() +
+                       block_mig_state.submitted * BLOCK_SIZE +
+                       block_mig_state.read_done * BLOCK_SIZE;
+
+    /* Report at least one block pending during bulk phase */
+    if (pending == 0 && !block_mig_state.bulk_completed) {
+        pending = BLOCK_SIZE;
+    }
+    blk_mig_unlock();
+    qemu_mutex_unlock_iothread();
+
+    DPRINTF("Enter save live pending  %" PRIu64 "\n", pending);
+    return pending;
 }
 
 static int block_load(QEMUFile *f, void *opaque, int version_id)
@@ -647,6 +742,7 @@ static int block_load(QEMUFile *f, void *opaque, int version_id)
     uint8_t *buf;
     int64_t total_sectors = 0;
     int nr_sectors;
+    int ret;
 
     do {
         addr = qemu_get_be64(f);
@@ -655,7 +751,6 @@ static int block_load(QEMUFile *f, void *opaque, int version_id)
         addr >>= BDRV_SECTOR_BITS;
 
         if (flags & BLK_MIG_FLAG_DEVICE_BLOCK) {
-            int ret;
             /* get device name */
             len = qemu_get_byte(f);
             qemu_get_buffer(f, (uint8_t *)device_name, len);
@@ -672,7 +767,7 @@ static int block_load(QEMUFile *f, void *opaque, int version_id)
                 bs_prev = bs;
                 total_sectors = bdrv_getlength(bs) >> BDRV_SECTOR_BITS;
                 if (total_sectors <= 0) {
-                    error_report("Error getting length of block device %s\n",
+                    error_report("Error getting length of block device %s",
                                  device_name);
                     return -EINVAL;
                 }
@@ -684,12 +779,15 @@ static int block_load(QEMUFile *f, void *opaque, int version_id)
                 nr_sectors = BDRV_SECTORS_PER_DIRTY_CHUNK;
             }
 
-            buf = qemu_malloc(BLOCK_SIZE);
+            if (flags & BLK_MIG_FLAG_ZERO_BLOCK) {
+                ret = bdrv_write_zeroes(bs, addr, nr_sectors);
+            } else {
+                buf = g_malloc(BLOCK_SIZE);
+                qemu_get_buffer(f, buf, BLOCK_SIZE);
+                ret = bdrv_write(bs, addr, buf, nr_sectors);
+                g_free(buf);
+            }
 
-            qemu_get_buffer(f, buf, BLOCK_SIZE);
-            ret = bdrv_write(bs, addr, buf, nr_sectors);
-
-            qemu_free(buf);
             if (ret < 0) {
                 return ret;
             }
@@ -702,31 +800,49 @@ static int block_load(QEMUFile *f, void *opaque, int version_id)
                    (addr == 100) ? '\n' : '\r');
             fflush(stdout);
         } else if (!(flags & BLK_MIG_FLAG_EOS)) {
-            fprintf(stderr, "Unknown flags\n");
+            fprintf(stderr, "Unknown block migration flags: %#x\n", flags);
             return -EINVAL;
         }
-        if (qemu_file_has_error(f)) {
-            return -EIO;
+        ret = qemu_file_get_error(f);
+        if (ret != 0) {
+            return ret;
         }
     } while (!(flags & BLK_MIG_FLAG_EOS));
 
     return 0;
 }
 
-static void block_set_params(int blk_enable, int shared_base, void *opaque)
+static void block_set_params(const MigrationParams *params, void *opaque)
 {
-    block_mig_state.blk_enable = blk_enable;
-    block_mig_state.shared_base = shared_base;
+    block_mig_state.blk_enable = params->blk;
+    block_mig_state.shared_base = params->shared;
 
     /* shared base means that blk_enable = 1 */
-    block_mig_state.blk_enable |= shared_base;
+    block_mig_state.blk_enable |= params->shared;
 }
+
+static bool block_is_active(void *opaque)
+{
+    return block_mig_state.blk_enable == 1;
+}
+
+SaveVMHandlers savevm_block_handlers = {
+    .set_params = block_set_params,
+    .save_live_setup = block_save_setup,
+    .save_live_iterate = block_save_iterate,
+    .save_live_complete = block_save_complete,
+    .save_live_pending = block_save_pending,
+    .load_state = block_load,
+    .cancel = block_migration_cancel,
+    .is_active = block_is_active,
+};
 
 void blk_mig_init(void)
 {
     QSIMPLEQ_INIT(&block_mig_state.bmds_list);
     QSIMPLEQ_INIT(&block_mig_state.blk_list);
+    qemu_mutex_init(&block_mig_state.lock);
 
-    register_savevm_live(NULL, "block", 0, 1, block_set_params,
-                         block_save_live, NULL, block_load, &block_mig_state);
+    register_savevm_live(NULL, "block", 0, 1, &savevm_block_handlers,
+                         &block_mig_state);
 }

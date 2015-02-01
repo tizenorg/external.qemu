@@ -1,0 +1,158 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Thu, 5 Jul 2012 17:31:39 +0200
+Subject: linux-user: lock tcg
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+The tcg code generator is not thread safe. Lock its generation between
+different threads.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+[AF: Rebased onto exec.c/translate-all.c split for 1.4]
+Signed-off-by: Andreas Färber <afaerber@suse.de>
+---
+ linux-user/mmap.c |  3 +++
+ tcg/tcg.c         | 36 ++++++++++++++++++++++++++++++++++--
+ tcg/tcg.h         |  6 ++++++
+ 3 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/linux-user/mmap.c b/linux-user/mmap.c
+index 34a5615..7ebf953 100644
+--- a/linux-user/mmap.c
++++ b/linux-user/mmap.c
+@@ -30,6 +30,7 @@
+ 
+ #include "qemu.h"
+ #include "qemu-common.h"
++#include "tcg.h"
+ 
+ //#define DEBUG_MMAP
+ 
+@@ -40,6 +41,7 @@ void mmap_lock(void)
+ {
+     if (mmap_lock_count++ == 0) {
+         pthread_mutex_lock(&mmap_mutex);
++        tcg_lock();
+     }
+ }
+ 
+@@ -47,6 +49,7 @@ void mmap_unlock(void)
+ {
+     if (--mmap_lock_count == 0) {
+         pthread_mutex_unlock(&mmap_mutex);
++        tcg_unlock();
+     }
+ }
+ 
+diff --git a/tcg/tcg.c b/tcg/tcg.c
+index dac8224..914456f 100644
+--- a/tcg/tcg.c
++++ b/tcg/tcg.c
+@@ -40,6 +40,8 @@
+ #include "qemu/cache-utils.h"
+ #include "qemu/host-utils.h"
+ #include "qemu/timer.h"
++#include "config-host.h"
++#include "qemu/thread.h"
+ 
+ /* Note: the long term plan is to reduce the dependancies on the QEMU
+    CPU definitions. Currently they are used for qemu_ld/st
+@@ -114,6 +116,29 @@ const size_t tcg_op_defs_max = ARRAY_SIZE(tcg_op_defs);
+ static TCGRegSet tcg_target_available_regs[2];
+ static TCGRegSet tcg_target_call_clobber_regs;
+ 
++#ifdef CONFIG_USER_ONLY
++static __thread int tcg_lock_count;
++#endif
++void tcg_lock(void)
++{
++#ifdef CONFIG_USER_ONLY
++    TCGContext *s = &tcg_ctx;
++    if (tcg_lock_count++ == 0) {
++        qemu_mutex_lock(&s->lock);
++    }
++#endif
++}
++
++void tcg_unlock(void)
++{
++#ifdef CONFIG_USER_ONLY
++    TCGContext *s = &tcg_ctx;
++    if (--tcg_lock_count == 0) {
++        qemu_mutex_unlock(&s->lock);
++    }
++#endif
++}
++
+ static inline void tcg_out8(TCGContext *s, uint8_t v)
+ {
+     *s->code_ptr++ = v;
+@@ -253,7 +278,8 @@ void tcg_context_init(TCGContext *s)
+ 
+     memset(s, 0, sizeof(*s));
+     s->nb_globals = 0;
+-    
++    qemu_mutex_init(&s->lock);
++
+     /* Count total number of arguments and allocate the corresponding
+        space */
+     total_args = 0;
+@@ -2379,11 +2405,13 @@ int tcg_gen_code(TCGContext *s, uint8_t *gen_code_buf)
+     }
+ #endif
+ 
++    tcg_lock();
+     tcg_gen_code_common(s, gen_code_buf, -1);
+ 
+     /* flush instruction cache */
+     flush_icache_range((tcg_target_ulong)gen_code_buf,
+                        (tcg_target_ulong)s->code_ptr);
++    tcg_unlock();
+ 
+     return s->code_ptr -  gen_code_buf;
+ }
+@@ -2394,7 +2422,11 @@ int tcg_gen_code(TCGContext *s, uint8_t *gen_code_buf)
+    Return -1 if not found. */
+ int tcg_gen_code_search_pc(TCGContext *s, uint8_t *gen_code_buf, long offset)
+ {
+-    return tcg_gen_code_common(s, gen_code_buf, offset);
++    int r;
++    tcg_lock();
++    r = tcg_gen_code_common(s, gen_code_buf, offset);
++    tcg_unlock();
++    return r;
+ }
+ 
+ #ifdef CONFIG_PROFILER
+diff --git a/tcg/tcg.h b/tcg/tcg.h
+index f3f9889..49ede77 100644
+--- a/tcg/tcg.h
++++ b/tcg/tcg.h
+@@ -46,6 +46,8 @@ typedef uint64_t tcg_target_ulong;
+ #error unsupported
+ #endif
+ 
++#include "config-host.h"
++#include "qemu/thread.h"
+ #include "tcg-target.h"
+ #include "tcg-runtime.h"
+ 
+@@ -490,6 +492,7 @@ struct TCGContext {
+     TCGLabelQemuLdst *qemu_ldst_labels;
+     int nb_qemu_ldst_labels;
+ #endif
++    QemuMutex lock;
+ };
+ 
+ extern TCGContext tcg_ctx;
+@@ -670,6 +673,9 @@ void tcg_gen_shifti_i64(TCGv_i64 ret, TCGv_i64 arg1,
+ TCGArg *tcg_optimize(TCGContext *s, uint16_t *tcg_opc_ptr, TCGArg *args,
+                      TCGOpDef *tcg_op_def);
+ 
++extern void tcg_lock(void);
++extern void tcg_unlock(void);
++
+ /* only used for debugging purposes */
+ void tcg_register_helper(void *func, const char *name);
+ const char *tcg_helper_get_name(TCGContext *s, void *func);

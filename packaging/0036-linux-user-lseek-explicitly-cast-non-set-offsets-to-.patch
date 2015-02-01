@@ -1,0 +1,37 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Thu, 13 Dec 2012 14:29:22 +0100
+Subject: linux-user: lseek: explicitly cast non-set offsets to signed
+
+When doing lseek, SEEK_SET indicates that the offset is an unsigned variable.
+Other seek types have parameters that can be negative.
+
+When converting from 32bit to 64bit parameters, we need to take this into
+account and enable SEEK_END and SEEK_CUR to be negative, while SEEK_SET stays
+absolute positioned which we need to maintain as unsigned.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+---
+ linux-user/syscall.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index ab30b58..4136873 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -5548,9 +5548,14 @@ abi_long do_syscall(void *cpu_env, int num, abi_ulong arg1,
+     case TARGET_NR_oldstat:
+         goto unimplemented;
+ #endif
+-    case TARGET_NR_lseek:
+-        ret = get_errno(lseek(arg1, arg2, arg3));
++    case TARGET_NR_lseek: {
++        off_t off = arg2;
++        if (arg3 != SEEK_SET) {
++            off = (abi_long)arg2;
++        }
++        ret = get_errno(lseek(arg1, off, arg3));
+         break;
++    }
+ #if defined(TARGET_NR_getxpid) && defined(TARGET_ALPHA)
+     /* Alpha specific */
+     case TARGET_NR_getxpid:

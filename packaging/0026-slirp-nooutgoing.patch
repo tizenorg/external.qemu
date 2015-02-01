@@ -1,0 +1,124 @@
+From: =?utf-8?q?Andreas_F=C3=A4rber?= <afaerber@suse.de>
+Date: Wed, 29 Aug 2012 18:42:56 +0200
+Subject: slirp: -nooutgoing
+
+TBD (from SUSE Studio team)
+---
+ qemu-options.hx  | 10 ++++++++++
+ slirp/socket.c   |  8 ++++++++
+ slirp/tcp_subr.c | 13 +++++++++++++
+ vl.c             |  9 +++++++++
+ 4 files changed, 40 insertions(+)
+
+diff --git a/qemu-options.hx b/qemu-options.hx
+index d15338e..e8097ac 100644
+--- a/qemu-options.hx
++++ b/qemu-options.hx
+@@ -2574,6 +2574,16 @@ Store the QEMU process PID in @var{file}. It is useful if you launch QEMU
+ from a script.
+ ETEXI
+ 
++DEF("nooutgoing", HAS_ARG, QEMU_OPTION_nooutgoing, \
++    "-nooutgoing <IP>\n" \
++    "                incoming traffic only from IP, no outgoing\n", \
++    QEMU_ARCH_ALL)
++STEXI
++@item -nooutgoing
++Forbid userspace networking to make outgoing connections. Only accept incoming
++connections from ip address IP.
++ETEXI
++
+ DEF("singlestep", 0, QEMU_OPTION_singlestep, \
+     "-singlestep     always run in singlestep mode\n", QEMU_ARCH_ALL)
+ STEXI
+diff --git a/slirp/socket.c b/slirp/socket.c
+index 8e8819c..57a45dc 100644
+--- a/slirp/socket.c
++++ b/slirp/socket.c
+@@ -532,6 +532,8 @@ sorecvfrom(struct socket *so)
+ 	} /* if ping packet */
+ }
+ 
++extern int slirp_nooutgoing;
++
+ /*
+  * sendto() a socket
+  */
+@@ -562,6 +564,12 @@ sosendto(struct socket *so, struct mbuf *m)
+ 
+ 	DEBUG_MISC((dfd, " sendto()ing, addr.sin_port=%d, addr.sin_addr.s_addr=%.16s\n", ntohs(addr.sin_port), inet_ntoa(addr.sin_addr)));
+ 
++	/* Only allow DNS requests */
++	if (slirp_nooutgoing && ntohs(addr.sin_port) != 53) {
++		errno = EHOSTUNREACH;
++		return -1;
++	}
++
+ 	/* Don't care what port we get */
+ 	ret = sendto(so->s, m->m_data, m->m_len, 0,
+ 		     (struct sockaddr *)&addr, sizeof (struct sockaddr));
+diff --git a/slirp/tcp_subr.c b/slirp/tcp_subr.c
+index 043f28f..76b6525 100644
+--- a/slirp/tcp_subr.c
++++ b/slirp/tcp_subr.c
+@@ -324,6 +324,9 @@ tcp_sockclosed(struct tcpcb *tp)
+  * nonblocking.  Connect returns after the SYN is sent, and does
+  * not wait for ACK+SYN.
+  */
++
++extern int slirp_nooutgoing;
++
+ int tcp_fconnect(struct socket *so)
+ {
+   Slirp *slirp = so->slirp;
+@@ -332,6 +335,11 @@ int tcp_fconnect(struct socket *so)
+   DEBUG_CALL("tcp_fconnect");
+   DEBUG_ARG("so = %lx", (long )so);
+ 
++  if (slirp_nooutgoing) {
++    errno = EHOSTUNREACH;
++    return -1;
++  }
++
+   if( (ret = so->s = qemu_socket(AF_INET,SOCK_STREAM,0)) >= 0) {
+     int opt, s=so->s;
+     struct sockaddr_in addr;
+@@ -425,6 +433,11 @@ void tcp_connect(struct socket *inso)
+         tcp_close(sototcpcb(so)); /* This will sofree() as well */
+         return;
+     }
++    if (slirp_nooutgoing && addr.sin_addr.s_addr != slirp_nooutgoing) {
++        tcp_close(sototcpcb(so)); /* This will sofree() as well */
++        close(s);
++        return;
++    }
+     qemu_set_nonblock(s);
+     opt = 1;
+     qemu_setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+diff --git a/vl.c b/vl.c
+index f422a1c..b041911 100644
+--- a/vl.c
++++ b/vl.c
+@@ -217,6 +217,7 @@ const char *vnc_display;
+ int acpi_enabled = 1;
+ int no_hpet = 0;
+ int fd_bootchk = 1;
++int slirp_nooutgoing = 0;
+ static int no_reboot;
+ int no_shutdown = 0;
+ int cursor_hide = 1;
+@@ -3307,6 +3308,14 @@ int main(int argc, char **argv, char **envp)
+             case QEMU_OPTION_singlestep:
+                 singlestep = 1;
+                 break;
++            case QEMU_OPTION_nooutgoing:
++                slirp_nooutgoing = inet_addr(optarg);
++                if (slirp_nooutgoing == INADDR_NONE) {
++                    printf("Invalid address: %s.\nOnly addresses of the format "
++                           "xxx.xxx.xxx.xxx are supported.\n", optarg);
++                    exit(1);
++                }
++                break;
+             case QEMU_OPTION_S:
+                 autostart = 0;
+                 break;

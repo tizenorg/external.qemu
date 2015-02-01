@@ -1,0 +1,26 @@
+From: Dinar Valeev <k0da@opensuse.org>
+Date: Wed, 2 Oct 2013 17:56:03 +0200
+Subject: configure: Enable PIE for ppc and ppc64 hosts
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+Signed-off-by: Dinar Valeev <dvaleev@suse.com>
+Signed-off-by: Andreas Färber <afaerber@suse.de>
+---
+ configure | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/configure b/configure
+index 18fa608..0a4b22e 100755
+--- a/configure
++++ b/configure
+@@ -1251,7 +1251,7 @@ fi
+ 
+ if test "$pie" = ""; then
+   case "$cpu-$targetos" in
+-    i386-Linux|x86_64-Linux|i386-OpenBSD|x86_64-OpenBSD)
++    i386-Linux|x86_64-Linux|ppc*-Linux|i386-OpenBSD|x86_64-OpenBSD)
+       ;;
+     *)
+       pie="no"

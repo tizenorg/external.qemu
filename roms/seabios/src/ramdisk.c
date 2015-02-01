@@ -9,19 +9,21 @@
 #include "memmap.h" // add_e820
 #include "biosvar.h" // GET_GLOBAL
 #include "bregs.h" // struct bregs
+#include "boot.h" // boot_add_floppy
 
 void
 ramdisk_setup(void)
 {
-    if (!CONFIG_COREBOOT || !CONFIG_COREBOOT_FLASH || !CONFIG_FLASH_FLOPPY)
+    if (!CONFIG_FLASH_FLOPPY)
         return;
 
     // Find image.
-    struct cbfs_file *file = cbfs_findprefix("floppyimg/", NULL);
+    struct romfile_s *file = romfile_findprefix("floppyimg/", NULL);
     if (!file)
         return;
-    u32 size = cbfs_datasize(file);
-    dprintf(3, "Found floppy file %s of size %d\n", cbfs_filename(file), size);
+    const char *filename = file->name;
+    u32 size = file->size;
+    dprintf(3, "Found floppy file %s of size %d\n", filename, size);
     int ftype = find_floppy_type(size);
     if (ftype < 0) {
         dprintf(3, "No floppy type found for ramdisk size\n");
@@ -37,13 +39,18 @@ ramdisk_setup(void)
     add_e820((u32)pos, size, E820_RESERVED);
 
     // Copy image into ram.
-    cbfs_copyfile(file, pos, size);
+    int ret = file->copy(file, pos, size);
+    if (ret < 0)
+        return;
 
     // Setup driver.
-    dprintf(1, "Mapping CBFS floppy %s to addr %p\n", cbfs_filename(file), pos);
-    struct drive_s *drive_g = addFloppy((u32)pos, ftype, DTYPE_RAMDISK);
+    struct drive_s *drive_g = init_floppy((u32)pos, ftype);
     if (!drive_g)
-        strtcpy(drive_g->desc, cbfs_filename(file), MAXDESCSIZE);
+        return;
+    drive_g->type = DTYPE_RAMDISK;
+    dprintf(1, "Mapping CBFS floppy %s to addr %p\n", filename, pos);
+    char *desc = znprintf(MAXDESCSIZE, "Ramdisk [%s]", &filename[10]);
+    boot_add_floppy(drive_g, desc, bootprio_find_named_rom(filename, 0));
 }
 
 static int

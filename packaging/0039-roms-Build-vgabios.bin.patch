@@ -1,0 +1,21 @@
+From: Bruce Rogers <brogers@suse.com>
+Date: Wed, 2 Oct 2013 17:51:46 +0200
+Subject: roms: Build vgabios.bin
+
+---
+ roms/Makefile | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/roms/Makefile b/roms/Makefile
+index 7a228ae..bbf21a9 100644
+--- a/roms/Makefile
++++ b/roms/Makefile
+@@ -50,6 +50,8 @@ seavgabios-%: config.vga.%
+ 	cp seabios/out/vgabios.bin ../pc-bios/vgabios-$*.bin
+ 
+ lgplvgabios: $(patsubst %,lgplvgabios-%,$(vgabios_variants))
++	make -C vgabios vgabios.bin
++	cp vgabios/VGABIOS-lgpl-latest.bin ../pc-bios/vgabios.bin
+ 
+ lgplvgabios-%:
+ 	make -C vgabios vgabios-$*.bin
