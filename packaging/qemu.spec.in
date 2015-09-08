@@ -1,0 +1,289 @@
+#
+# spec file for package qemu
+#
+# Copyright (c) 2012 SUSE LINUX Products GmbH, Nuernberg, Germany.
+#
+# All modifications and additions to the file contributed by third parties
+# remain the property of their copyright owners, unless otherwise agreed
+# upon. The license for this file, and modifications and additions to the
+# file, is the same license as for the pristine package itself (unless the
+# license for the pristine package is not an Open Source License, in which
+# case the license is the MIT License). An "Open Source License" is a
+# license that conforms to the Open Source Definition (Version 1.9)
+# published by the Open Source Initiative.
+
+# Please submit bugfixes or comments via http://bugs.opensuse.org/
+#
+
+
+Name:           qemu
+Url:            http://www.qemu.org/
+Summary:        Universal CPU emulator
+License:        BSD-3-Clause ; GPL-2.0+ ; LGPL-2.1+ ; MIT
+Group:          System/Emulators/PC
+Version:        1.2.0
+Release:        0
+Source:         %name-%version.tar.bz2
+PATCH_FILES
+# this is to make lint happy
+Source300:      rpmlintrc
+Source302:      bridge.conf
+Source400:      update_git.sh
+BuildRoot:      %{_tmppath}/%{name}-%{version}-build
+BuildRequires:  SDL-devel
+BuildRequires:  bison
+BuildRequires:  bluez-devel
+BuildRequires:  curl-devel
+BuildRequires:  cyrus-sasl-devel
+BuildRequires:  e2fsprogs-devel
+BuildRequires:  libaio
+BuildRequires:  libaio-devel
+BuildRequires:  libattr-devel
+BuildRequires:  libcap-devel
+BuildRequires:  libcap-ng-devel
+BuildRequires:  libgnutls-devel
+BuildRequires:  libjpeg-devel
+BuildRequires:  libpcap-devel
+BuildRequires:  libpng-devel
+BuildRequires:  mozilla-nss-devel >= 3.12.8
+BuildRequires:  ncurses-devel
+# we must not install the qemu package when under qemu build
+%if 0%{?qemu_user_space_build:1}
+BuildRequires:  -post-build-checks
+%endif
+%if 0%{?suse_version} >= 1120
+BuildRequires:  zlib-devel-static
+%else
+BuildRequires:  zlib-devel
+%endif
+%if 0%{?suse_version} >= 1210
+BuildRequires:  glibc-devel-static
+BuildRequires:  libattr-devel-static
+BuildRequires:  libfdt1-devel
+%endif
+%if 0%{?suse_version} >= 1140
+BuildRequires:  glib2-devel-static
+%endif
+%if 0%{?suse_version} >= 1220
+BuildRequires:  pcre-devel-static
+%endif
+%if 0%{?suse_version} >= 1130
+%ifarch %ix86 x86_64
+BuildRequires:  libspice-server-devel
+BuildRequires:  spice-protocol-devel
+%endif
+%endif
+%ifarch ppc ppc64
+#we need that for -M pseries support in SLES
+BuildRequires:  libfdt1-devel
+%endif
+BuildRequires:  fdupes
+BuildRequires:  glib2-devel
+BuildRequires:  libvdeplug3-devel
+BuildRequires:  pwdutils
+BuildRequires:  python
+Requires:       /usr/sbin/groupadd
+Requires:       pwdutils
+Requires:       timezone
+Recommends:     qemu-tools
+
+%description
+QEMU is an extremely well-performing CPU emulator that allows you to
+choose between simulating an entire system and running userspace
+binaries for different architectures under your native operating
+system. It currently emulates x86, ARM, PowerPC and SPARC CPUs as well
+as PC and PowerMac systems.
+
+%package tools
+Summary:        Universal CPU emulator -- Tools
+Group:          System/Emulators/PC
+Provides:       qemu:%_libexecdir/qemu-bridge-helper
+PreReq:         permissions
+
+%description tools
+QEMU is an extremely well-performing CPU emulator that allows you to
+choose between simulating an entire system and running userspace
+binaries for different architectures under your native operating
+system. It currently emulates x86, ARM, PowerPC and SPARC CPUs as well
+as PC and PowerMac systems.
+
+This sub-package contains various tools, including a bridge helper.
+
+%package guest-agent
+Summary:        Universal CPU emulator -- Guest agent
+Group:          System/Emulators/PC
+Provides:       qemu:%_bindir/qemu-ga
+
+%description guest-agent
+QEMU is an extremely well-performing CPU emulator that allows you to
+choose between simulating an entire system and running userspace
+binaries for different architectures under your native operating
+system. It currently emulates x86, ARM, PowerPC and SPARC CPUs as well
+as PC and PowerMac systems.
+
+This sub-package contains the guest agent.
+
+%package linux-user
+Summary:        Universal CPU emulator -- Linux User binaries
+Group:          System/Emulators/PC
+Provides:       qemu:%_bindir/qemu-arm
+
+%description linux-user
+QEMU is an extremely well-performing CPU emulator that allows you to
+choose between simulating an entire system and running userspace
+binaries for different architectures under your native operating
+system. It currently emulates x86, ARM, PowerPC and SPARC CPUs as well
+as PC and PowerMac systems.
+
+This sub-package contains statically linked binaries for running linux-user
+emulations. This can be used together with the OBS build script to
+run cross-architecture builds.
+
+%prep
+%setup -q -n %name-%version
+PATCH_EXEC
+
+%build
+# build QEMU
+mkdir -p dynamic
+# build qemu-system
+./configure --prefix=%_prefix --sysconfdir=%_sysconfdir \
+	--libexecdir=%_libexecdir \
+	--audio-card-list="ac97 es1370 sb16 cs4231a adlib gus" \
+	--audio-drv-list="alsa sdl" --enable-mixemu --enable-vde \
+	--enable-curl \
+	--enable-virtfs \
+	--extra-cflags="$QEMU_OPT_FLAGS" --enable-system --disable-linux-user \
+%if 0%{?suse_version} >= 1130
+%ifarch %ix86 x86_64
+	--enable-spice
+%else
+	--disable-spice
+%endif
+%else
+	--disable-spice
+%endif
+make %{?jobs:-j%jobs} V=1
+mv *-softmmu/qemu-system-* dynamic
+mv qemu-io qemu-img qemu-nbd qemu-bridge-helper dynamic
+mv qemu-img.1 qemu-nbd.8 dynamic
+mv qemu-ga dynamic
+mv fsdev/virtfs-proxy-helper{,.1} dynamic
+make clean
+# build userland emus
+./configure --prefix=%_prefix --sysconfdir=%_sysconfdir \
+	--libexecdir=%_libexecdir \
+	--enable-linux-user \
+	--disable-system \
+	--static --disable-linux-aio \
+	--extra-cflags="$QEMU_OPT_FLAGS"
+%if 0%{?suse_version} == 1140
+# -lrt needs to come after -lglib-2.0 to avoid undefined clock_gettime
+sed -i "s/-lglib-2.0/-lglib-2.0 -lrt/" config-host.mak
+%endif
+make %{?jobs:-j%jobs} V=1
+
+%install
+make install DESTDIR=$RPM_BUILD_ROOT
+rm -fr $RPM_BUILD_ROOT/%_datadir/doc
+install -m 755 dynamic/qemu-system-* $RPM_BUILD_ROOT/%_bindir
+install -m 755 dynamic/qemu-io $RPM_BUILD_ROOT/%_bindir
+install -m 755 dynamic/qemu-img $RPM_BUILD_ROOT/%_bindir
+install -m 755 dynamic/qemu-nbd $RPM_BUILD_ROOT/%_bindir
+install -m 755 dynamic/qemu-ga $RPM_BUILD_ROOT/%_bindir
+install -m 755 dynamic/virtfs-proxy-helper $RPM_BUILD_ROOT/%_bindir
+install -d -m 755 $RPM_BUILD_ROOT/%_sbindir
+install -m 755 scripts/qemu-binfmt-conf.sh $RPM_BUILD_ROOT/%_sbindir
+install -d -m 755 $RPM_BUILD_ROOT/%_libexecdir
+install -m 755 dynamic/qemu-bridge-helper $RPM_BUILD_ROOT/%_libexecdir
+install -d -m 755 $RPM_BUILD_ROOT/%_mandir/man1
+install -m 644 dynamic/qemu-img.1 $RPM_BUILD_ROOT/%_mandir/man1
+install -m 644 dynamic/virtfs-proxy-helper.1 $RPM_BUILD_ROOT/%_mandir/man1
+install -d -m 755 $RPM_BUILD_ROOT/%_mandir/man8
+install -m 644 dynamic/qemu-nbd.8 $RPM_BUILD_ROOT/%_mandir/man8
+install -D -m 644 %{SOURCE302} $RPM_BUILD_ROOT/%{_sysconfdir}/qemu/bridge.conf
+%ifnarch %ix86 x86_64
+ln -sf ../../../emul/ia32-linux $RPM_BUILD_ROOT/usr/share/qemu/qemu-i386
+%endif
+%ifnarch ia64
+mkdir -p $RPM_BUILD_ROOT/emul/ia32-linux
+%endif
+%fdupes -s $RPM_BUILD_ROOT
+
+%clean
+rm -rf ${RPM_BUILD_ROOT}
+
+%pre
+%{_bindir}/getent group kvm >/dev/null || %{_sbindir}/groupadd -r kvm 2>/dev/null
+%{_bindir}/getent group qemu >/dev/null || %{_sbindir}/groupadd -r qemu 2>/dev/null
+%{_bindir}/getent passwd qemu >/dev/null || \
+  %{_sbindir}/useradd -r -g qemu -G kvm -d / -s /sbin/nologin \
+  -c "qemu user" qemu
+
+%if 0%{?suse_version} >= 1130
+%post tools
+%set_permissions %_libexecdir/qemu-bridge-helper
+
+%verifyscript tools
+%verify_permissions %_libexecdir/qemu-bridge-helper
+%endif
+
+%files
+%defattr(-, root, root)
+%doc COPYING COPYING.LIB Changelog README TODO VERSION qemu-doc.html qemu-tech.html
+%_bindir/qemu-system-*
+%doc %_mandir/man1/qemu.1.gz
+%_datadir/%name
+%ifnarch %ix86 x86_64 ia64
+%dir /emul/ia32-linux
+%endif
+%dir %_sysconfdir/%name
+%config %_sysconfdir/%name/target-x86_64.conf
+
+%files tools
+%defattr(-, root, root)
+%doc %_mandir/man1/qemu-img.1.gz
+%doc %_mandir/man1/virtfs-proxy-helper.1.gz
+%doc %_mandir/man8/qemu-nbd.8.gz
+%_bindir/qemu-io
+%_bindir/qemu-img
+%_bindir/qemu-nbd
+%_bindir/virtfs-proxy-helper
+%verify(not mode) %_libexecdir/qemu-bridge-helper
+%dir %_sysconfdir/%name
+%config %_sysconfdir/%name/bridge.conf
+
+%files guest-agent
+%defattr(-, root, root)
+%attr(755,root,kvm) %_bindir/qemu-ga
+
+%files linux-user
+%defattr(-, root, root)
+%_bindir/qemu-alpha
+%_bindir/qemu-arm
+%_bindir/qemu-armeb
+%_bindir/qemu-cris
+%_bindir/qemu-i386
+%_bindir/qemu-m68k
+%_bindir/qemu-microblaze
+%_bindir/qemu-microblazeel
+%_bindir/qemu-mips
+%_bindir/qemu-mipsel
+%_bindir/qemu-mipsn32
+%_bindir/qemu-mipsn32el
+%_bindir/qemu-or32
+%_bindir/qemu-ppc64abi32
+%_bindir/qemu-ppc64
+%_bindir/qemu-ppc
+%_bindir/qemu-s390x
+%_bindir/qemu-sh4
+%_bindir/qemu-sh4eb
+%_bindir/qemu-sparc32plus
+%_bindir/qemu-sparc64
+%_bindir/qemu-sparc
+%_bindir/qemu-unicore32
+%_bindir/qemu-x86_64
+%_bindir/qemu-*-binfmt
+%_sbindir/qemu-binfmt-conf.sh
+
+%changelog

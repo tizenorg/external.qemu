@@ -24,18 +24,23 @@
 #include <signal.h>
 
 #include "cpu.h"
-#include "exec-all.h"
-#include "hw/sh_intc.h"
+
+#if !defined(CONFIG_USER_ONLY)
+#include "hw/sh4/sh_intc.h"
+#endif
 
 #if defined(CONFIG_USER_ONLY)
 
-void do_interrupt (CPUState *env)
+void superh_cpu_do_interrupt(CPUState *cs)
 {
-  env->exception_index = -1;
+    SuperHCPU *cpu = SUPERH_CPU(cs);
+    CPUSH4State *env = &cpu->env;
+
+    env->exception_index = -1;
 }
 
-int cpu_sh4_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
-			     int mmu_idx, int is_softmmu)
+int cpu_sh4_handle_mmu_fault(CPUSH4State * env, target_ulong address, int rw,
+                             int mmu_idx)
 {
     env->tea = address;
     env->exception_index = -1;
@@ -76,9 +81,11 @@ int cpu_sh4_is_cached(CPUSH4State * env, target_ulong addr)
 #define MMU_DADDR_ERROR_READ     (-12)
 #define MMU_DADDR_ERROR_WRITE    (-13)
 
-void do_interrupt(CPUState * env)
+void superh_cpu_do_interrupt(CPUState *cs)
 {
-    int do_irq = env->interrupt_request & CPU_INTERRUPT_HARD;
+    SuperHCPU *cpu = SUPERH_CPU(cs);
+    CPUSH4State *env = &cpu->env;
+    int do_irq = cs->interrupt_request & CPU_INTERRUPT_HARD;
     int do_exp, irq_vector = env->exception_index;
 
     /* prioritize exceptions over interrupts */
@@ -90,11 +97,11 @@ void do_interrupt(CPUState * env)
         if (do_exp && env->exception_index != 0x1e0) {
             env->exception_index = 0x000; /* masked exception -> reset */
         }
-        if (do_irq && !env->intr_at_halt) {
+        if (do_irq && !env->in_sleep) {
             return; /* masked */
         }
-        env->intr_at_halt = 0;
     }
+    env->in_sleep = 0;
 
     if (do_irq) {
         irq_vector = sh_intc_get_pending_vector(env->intc_handle,
@@ -152,7 +159,7 @@ void do_interrupt(CPUState * env)
 	}
 	qemu_log("exception 0x%03x [%s] raised\n",
 		  irq_vector, expname);
-	log_cpu_state(env, 0);
+        log_cpu_state(cs, 0);
     }
 
     env->ssr = env->sr;
@@ -200,7 +207,7 @@ void do_interrupt(CPUState * env)
     }
 }
 
-static void update_itlb_use(CPUState * env, int itlbnb)
+static void update_itlb_use(CPUSH4State * env, int itlbnb)
 {
     uint8_t or_mask = 0, and_mask = (uint8_t) - 1;
 
@@ -225,7 +232,7 @@ static void update_itlb_use(CPUState * env, int itlbnb)
     env->mmucr |= (or_mask << 24);
 }
 
-static int itlb_replacement(CPUState * env)
+static int itlb_replacement(CPUSH4State * env)
 {
     if ((env->mmucr & 0xe0000000) == 0xe0000000)
 	return 0;
@@ -241,7 +248,7 @@ static int itlb_replacement(CPUState * env)
 /* Find the corresponding entry in the right TLB
    Return entry, MMU_DTLB_MISS or MMU_DTLB_MULTIPLE
 */
-static int find_tlb_entry(CPUState * env, target_ulong address,
+static int find_tlb_entry(CPUSH4State * env, target_ulong address,
 			  tlb_t * entries, uint8_t nbtlb, int use_asid)
 {
     int match = MMU_DTLB_MISS;
@@ -267,7 +274,7 @@ static int find_tlb_entry(CPUState * env, target_ulong address,
     return match;
 }
 
-static void increment_urc(CPUState * env)
+static void increment_urc(CPUSH4State * env)
 {
     uint8_t urb, urc;
 
@@ -283,7 +290,7 @@ static void increment_urc(CPUState * env)
 /* Copy and utlb entry into itlb
    Return entry
 */
-static int copy_utlb_entry_itlb(CPUState *env, int utlb)
+static int copy_utlb_entry_itlb(CPUSH4State *env, int utlb)
 {
     int itlb;
 
@@ -301,7 +308,7 @@ static int copy_utlb_entry_itlb(CPUState *env, int utlb)
 /* Find itlb entry
    Return entry, MMU_ITLB_MISS, MMU_ITLB_MULTIPLE or MMU_DTLB_MULTIPLE
 */
-static int find_itlb_entry(CPUState * env, target_ulong address,
+static int find_itlb_entry(CPUSH4State * env, target_ulong address,
                            int use_asid)
 {
     int e;
@@ -319,7 +326,7 @@ static int find_itlb_entry(CPUState * env, target_ulong address,
 
 /* Find utlb entry
    Return entry, MMU_DTLB_MISS, MMU_DTLB_MULTIPLE */
-static int find_utlb_entry(CPUState * env, target_ulong address, int use_asid)
+static int find_utlb_entry(CPUSH4State * env, target_ulong address, int use_asid)
 {
     /* per utlb access */
     increment_urc(env);
@@ -335,7 +342,7 @@ static int find_utlb_entry(CPUState * env, target_ulong address, int use_asid)
    MMU_ITLB_MULTIPLE, MMU_ITLB_VIOLATION,
    MMU_IADDR_ERROR, MMU_DADDR_ERROR_READ, MMU_DADDR_ERROR_WRITE.
 */
-static int get_mmu_address(CPUState * env, target_ulong * physical,
+static int get_mmu_address(CPUSH4State * env, target_ulong * physical,
 			   int *prot, target_ulong address,
 			   int rw, int access_type)
 {
@@ -401,7 +408,7 @@ static int get_mmu_address(CPUState * env, target_ulong * physical,
     return n;
 }
 
-static int get_physical_address(CPUState * env, target_ulong * physical,
+static int get_physical_address(CPUSH4State * env, target_ulong * physical,
                                 int *prot, target_ulong address,
                                 int rw, int access_type)
 {
@@ -440,8 +447,8 @@ static int get_physical_address(CPUState * env, target_ulong * physical,
     return get_mmu_address(env, physical, prot, address, rw, access_type);
 }
 
-int cpu_sh4_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
-			     int mmu_idx, int is_softmmu)
+int cpu_sh4_handle_mmu_fault(CPUSH4State * env, target_ulong address, int rw,
+                             int mmu_idx)
 {
     target_ulong physical;
     int prot, ret, access_type;
@@ -501,12 +508,13 @@ int cpu_sh4_handle_mmu_fault(CPUState * env, target_ulong address, int rw,
     return 0;
 }
 
-target_phys_addr_t cpu_get_phys_page_debug(CPUState * env, target_ulong addr)
+hwaddr superh_cpu_get_phys_page_debug(CPUState *cs, vaddr addr)
 {
+    SuperHCPU *cpu = SUPERH_CPU(cs);
     target_ulong physical;
     int prot;
 
-    get_physical_address(env, &physical, &prot, addr, 0, 0);
+    get_physical_address(&cpu->env, &physical, &prot, addr, 0, 0);
     return physical;
 }
 
@@ -572,7 +580,7 @@ void cpu_load_tlb(CPUSH4State * env)
 }
 
 uint32_t cpu_sh4_read_mmaped_itlb_addr(CPUSH4State *s,
-                                       target_phys_addr_t addr)
+                                       hwaddr addr)
 {
     int index = (addr & 0x00000300) >> 8;
     tlb_t * entry = &s->itlb[index];
@@ -582,7 +590,7 @@ uint32_t cpu_sh4_read_mmaped_itlb_addr(CPUSH4State *s,
            (entry->asid);
 }
 
-void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, target_phys_addr_t addr,
+void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, hwaddr addr,
 				    uint32_t mem_value)
 {
     uint32_t vpn = (mem_value & 0xfffffc00) >> 10;
@@ -602,7 +610,7 @@ void cpu_sh4_write_mmaped_itlb_addr(CPUSH4State *s, target_phys_addr_t addr,
 }
 
 uint32_t cpu_sh4_read_mmaped_itlb_data(CPUSH4State *s,
-                                       target_phys_addr_t addr)
+                                       hwaddr addr)
 {
     int array = (addr & 0x00800000) >> 23;
     int index = (addr & 0x00000300) >> 8;
@@ -624,7 +632,7 @@ uint32_t cpu_sh4_read_mmaped_itlb_data(CPUSH4State *s,
     }
 }
 
-void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, target_phys_addr_t addr,
+void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, hwaddr addr,
                                     uint32_t mem_value)
 {
     int array = (addr & 0x00800000) >> 23;
@@ -653,7 +661,7 @@ void cpu_sh4_write_mmaped_itlb_data(CPUSH4State *s, target_phys_addr_t addr,
 }
 
 uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
-                                       target_phys_addr_t addr)
+                                       hwaddr addr)
 {
     int index = (addr & 0x00003f00) >> 8;
     tlb_t * entry = &s->utlb[index];
@@ -665,7 +673,7 @@ uint32_t cpu_sh4_read_mmaped_utlb_addr(CPUSH4State *s,
            (entry->asid);
 }
 
-void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, target_phys_addr_t addr,
+void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, hwaddr addr,
 				    uint32_t mem_value)
 {
     int associate = addr & 0x0000080;
@@ -738,7 +746,7 @@ void cpu_sh4_write_mmaped_utlb_addr(CPUSH4State *s, target_phys_addr_t addr,
 }
 
 uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,
-                                       target_phys_addr_t addr)
+                                       hwaddr addr)
 {
     int array = (addr & 0x00800000) >> 23;
     int index = (addr & 0x00003f00) >> 8;
@@ -764,7 +772,7 @@ uint32_t cpu_sh4_read_mmaped_utlb_data(CPUSH4State *s,
     }
 }
 
-void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, target_phys_addr_t addr,
+void cpu_sh4_write_mmaped_utlb_data(CPUSH4State *s, hwaddr addr,
                                     uint32_t mem_value)
 {
     int array = (addr & 0x00800000) >> 23;
@@ -815,7 +823,7 @@ int cpu_sh4_is_cached(CPUSH4State * env, target_ulong addr)
     /*
      * TODO : Evaluate CCR and check if the cache is on or off.
      *        Now CCR is not in CPUSH4State, but in SH7750State.
-     *        When you move the ccr inot CPUSH4State, the code will be
+     *        When you move the ccr into CPUSH4State, the code will be
      *        as follows.
      */
 #if 0

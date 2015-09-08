@@ -20,7 +20,7 @@
 */
 
 #include "fpa11.h"
-#include "softfloat.h"
+#include "fpu/softfloat.h"
 #include "fpopcode.h"
 #include "fpa11.inl"
 //#include "fpmodule.h"
@@ -159,7 +159,7 @@ PerformComparisonOperation(floatx80 Fn, floatx80 Fm)
    }
 
    /* test for equal condition */
-   if (floatx80_eq(Fn,Fm, &fpa11->fp_status))
+   if (floatx80_eq_quiet(Fn,Fm, &fpa11->fp_status))
    {
       flags |= CC_ZERO;
    }

@@ -1,0 +1,71 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Tue, 12 Jun 2012 04:41:10 +0200
+Subject: linux-user: Ignore broken loop ioctl
+
+During invocations of losetup, we run into an ioctl that doesn't
+exist. However, because of that we output an error, which then
+screws up the kiwi logic around that call.
+
+So let's silently ignore that bogus ioctl.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+---
+ linux-user/ioctls.h       | 1 +
+ linux-user/linux_loop.h   | 1 +
+ linux-user/syscall.c      | 7 +++++++
+ linux-user/syscall_defs.h | 1 +
+ 4 files changed, 10 insertions(+)
+
+diff --git a/linux-user/ioctls.h b/linux-user/ioctls.h
+index 28dc0b2..da4f12c 100644
+--- a/linux-user/ioctls.h
++++ b/linux-user/ioctls.h
+@@ -326,6 +326,7 @@
+   IOCTL(LOOP_SET_STATUS64, IOC_W, MK_PTR(MK_STRUCT(STRUCT_loop_info64)))
+   IOCTL(LOOP_GET_STATUS64, IOC_W, MK_PTR(MK_STRUCT(STRUCT_loop_info64)))
+   IOCTL(LOOP_CHANGE_FD, 0, TYPE_INT)
++  IOCTL_SPECIAL(LOOP_BOGUS_CMD, 0, do_ioctl_fail, TYPE_INT)
+ 
+   IOCTL(MTIOCTOP, IOC_W, MK_PTR(MK_STRUCT(STRUCT_mtop)))
+   IOCTL(MTIOCGET, IOC_R, MK_PTR(MK_STRUCT(STRUCT_mtget)))
+diff --git a/linux-user/linux_loop.h b/linux-user/linux_loop.h
+index 8974caa..810ae61 100644
+--- a/linux-user/linux_loop.h
++++ b/linux-user/linux_loop.h
+@@ -91,5 +91,6 @@ struct loop_info64 {
+ #define LOOP_SET_STATUS64	0x4C04
+ #define LOOP_GET_STATUS64	0x4C05
+ #define LOOP_CHANGE_FD		0x4C06
++#define LOOP_BOGUS_CMD		0x4C82
+ 
+ #endif
+diff --git a/linux-user/syscall.c b/linux-user/syscall.c
+index 628fe66..38ca7af 100644
+--- a/linux-user/syscall.c
++++ b/linux-user/syscall.c
+@@ -3626,6 +3626,13 @@ static abi_long do_ioctl_rt(const IOCTLEntry *ie, uint8_t *buf_temp,
+     return ret;
+ }
+ 
++static abi_long do_ioctl_fail(const IOCTLEntry *ie, uint8_t *buf_temp, int fd,
++                              abi_long cmd, abi_long arg)
++{
++    /* Fail silently */
++    return -EINVAL;
++}
++
+ static IOCTLEntry ioctl_entries[] = {
+ #define IOCTL(cmd, access, ...) \
+     { TARGET_ ## cmd, cmd, #cmd, access, 0, {  __VA_ARGS__ } },
+diff --git a/linux-user/syscall_defs.h b/linux-user/syscall_defs.h
+index a8aba1b..bb83772 100644
+--- a/linux-user/syscall_defs.h
++++ b/linux-user/syscall_defs.h
+@@ -1020,6 +1020,7 @@ struct target_pollfd {
+ #define TARGET_LOOP_SET_STATUS64      0x4C04
+ #define TARGET_LOOP_GET_STATUS64      0x4C05
+ #define TARGET_LOOP_CHANGE_FD         0x4C06
++#define TARGET_LOOP_BOGUS_CMD         0x4C82
+ 
+ /* fb ioctls */
+ #define TARGET_FBIOGET_VSCREENINFO    0x4600

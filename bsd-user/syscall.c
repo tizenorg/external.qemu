@@ -31,7 +31,6 @@
 #include <sys/syscall.h>
 #include <sys/param.h>
 #include <sys/sysctl.h>
-#include <signal.h>
 #include <utime.h>
 
 #include "qemu.h"
@@ -212,7 +211,12 @@ static int sysctl_oldcvt(void *holdp, size_t holdlen, uint32_t kind)
         *(uint64_t *)holdp = tswap64(*(unsigned long *)holdp);
         break;
 #endif
+#ifdef CTLTYPE_U64
+    case CTLTYPE_S64:
+    case CTLTYPE_U64:
+#else
     case CTLTYPE_QUAD:
+#endif
         *(uint64_t *)holdp = tswap64(*(uint64_t *)holdp);
         break;
     case CTLTYPE_STRING:
@@ -232,7 +236,7 @@ static abi_long do_freebsd_sysctl(abi_ulong namep, int32_t namelen, abi_ulong ol
     void *hnamep, *holdp, *hnewp = NULL;
     size_t holdlen;
     abi_ulong oldlen = 0;
-    int32_t *snamep = qemu_malloc(sizeof(int32_t) * namelen), *p, *q, i;
+    int32_t *snamep = g_malloc(sizeof(int32_t) * namelen), *p, *q, i;
     uint32_t kind = 0;
 
     if (oldlenp)
@@ -256,7 +260,7 @@ static abi_long do_freebsd_sysctl(abi_ulong namep, int32_t namelen, abi_ulong ol
     unlock_user(holdp, oldp, holdlen);
     if (hnewp)
         unlock_user(hnewp, newp, 0);
-    qemu_free(snamep);
+    g_free(snamep);
     return ret;
 }
 #endif

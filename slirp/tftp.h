@@ -1,4 +1,6 @@
 /* tftp defines */
+#ifndef SLIRP_TFTP_H
+#define SLIRP_TFTP_H 1
 
 #define TFTP_SESSIONS_MAX 3
 
@@ -26,18 +28,22 @@ struct tftp_t {
       uint16_t tp_error_code;
       uint8_t tp_msg[512];
     } tp_error;
-    uint8_t tp_buf[512 + 2];
+    char tp_buf[512 + 2];
   } x;
 };
 
 struct tftp_session {
     Slirp *slirp;
     char *filename;
+    int fd;
 
     struct in_addr client_ip;
     uint16_t client_port;
+    uint32_t block_nr;
 
     int timestamp;
 };
 
 void tftp_input(struct mbuf *m);
+
+#endif

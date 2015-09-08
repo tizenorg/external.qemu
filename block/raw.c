@@ -1,53 +1,75 @@
+/*
+ * Block driver for RAW format
+ *
+ * Copyright (c) 2006 Fabrice Bellard
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
 
 #include "qemu-common.h"
-#include "block_int.h"
-#include "module.h"
+#include "block/block_int.h"
+#include "qemu/module.h"
 
-static int raw_open(BlockDriverState *bs, int flags)
+static int raw_open(BlockDriverState *bs, QDict *options, int flags)
 {
     bs->sg = bs->file->sg;
     return 0;
 }
 
-static int raw_read(BlockDriverState *bs, int64_t sector_num,
-                    uint8_t *buf, int nb_sectors)
+/* We have nothing to do for raw reopen, stubs just return
+ * success */
+static int raw_reopen_prepare(BDRVReopenState *state,
+                              BlockReopenQueue *queue,  Error **errp)
 {
-    return bdrv_read(bs->file, sector_num, buf, nb_sectors);
+    return 0;
 }
 
-static int raw_write(BlockDriverState *bs, int64_t sector_num,
-                     const uint8_t *buf, int nb_sectors)
+static int coroutine_fn raw_co_readv(BlockDriverState *bs, int64_t sector_num,
+                                     int nb_sectors, QEMUIOVector *qiov)
 {
-    return bdrv_write(bs->file, sector_num, buf, nb_sectors);
+    BLKDBG_EVENT(bs->file, BLKDBG_READ_AIO);
+    return bdrv_co_readv(bs->file, sector_num, nb_sectors, qiov);
 }
 
-static BlockDriverAIOCB *raw_aio_readv(BlockDriverState *bs,
-    int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-    BlockDriverCompletionFunc *cb, void *opaque)
+static int coroutine_fn raw_co_writev(BlockDriverState *bs, int64_t sector_num,
+                                      int nb_sectors, QEMUIOVector *qiov)
 {
-    return bdrv_aio_readv(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
-}
-
-static BlockDriverAIOCB *raw_aio_writev(BlockDriverState *bs,
-    int64_t sector_num, QEMUIOVector *qiov, int nb_sectors,
-    BlockDriverCompletionFunc *cb, void *opaque)
-{
-    return bdrv_aio_writev(bs->file, sector_num, qiov, nb_sectors, cb, opaque);
+    BLKDBG_EVENT(bs->file, BLKDBG_WRITE_AIO);
+    return bdrv_co_writev(bs->file, sector_num, nb_sectors, qiov);
 }
 
 static void raw_close(BlockDriverState *bs)
 {
 }
 
-static int raw_flush(BlockDriverState *bs)
+static int coroutine_fn raw_co_is_allocated(BlockDriverState *bs,
+                                            int64_t sector_num,
+                                            int nb_sectors, int *pnum)
 {
-    return bdrv_flush(bs->file);
+    return bdrv_co_is_allocated(bs->file, sector_num, nb_sectors, pnum);
 }
 
-static BlockDriverAIOCB *raw_aio_flush(BlockDriverState *bs,
-    BlockDriverCompletionFunc *cb, void *opaque)
+static int coroutine_fn raw_co_write_zeroes(BlockDriverState *bs,
+                                            int64_t sector_num,
+                                            int nb_sectors)
 {
-    return bdrv_aio_flush(bs->file, cb, opaque);
+    return bdrv_co_write_zeroes(bs->file, sector_num, nb_sectors);
 }
 
 static int64_t raw_getlength(BlockDriverState *bs)
@@ -65,9 +87,10 @@ static int raw_probe(const uint8_t *buf, int buf_size, const char *filename)
    return 1; /* everything can be opened as raw image */
 }
 
-static int raw_discard(BlockDriverState *bs, int64_t sector_num, int nb_sectors)
+static int coroutine_fn raw_co_discard(BlockDriverState *bs,
+                                       int64_t sector_num, int nb_sectors)
 {
-    return bdrv_discard(bs->file, sector_num, nb_sectors);
+    return bdrv_co_discard(bs->file, sector_num, nb_sectors);
 }
 
 static int raw_is_inserted(BlockDriverState *bs)
@@ -75,15 +98,19 @@ static int raw_is_inserted(BlockDriverState *bs)
     return bdrv_is_inserted(bs->file);
 }
 
-static int raw_eject(BlockDriverState *bs, int eject_flag)
+static int raw_media_changed(BlockDriverState *bs)
 {
-    return bdrv_eject(bs->file, eject_flag);
+    return bdrv_media_changed(bs->file);
 }
 
-static int raw_set_locked(BlockDriverState *bs, int locked)
+static void raw_eject(BlockDriverState *bs, bool eject_flag)
 {
-    bdrv_set_locked(bs->file, locked);
-    return 0;
+    bdrv_eject(bs->file, eject_flag);
+}
+
+static void raw_lock_medium(BlockDriverState *bs, bool locked)
+{
+    bdrv_lock_medium(bs->file, locked);
 }
 
 static int raw_ioctl(BlockDriverState *bs, unsigned long int req, void *buf)
@@ -117,29 +144,38 @@ static int raw_has_zero_init(BlockDriverState *bs)
     return bdrv_has_zero_init(bs->file);
 }
 
+static int raw_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+{
+    return bdrv_get_info(bs->file, bdi);
+}
+
 static BlockDriver bdrv_raw = {
     .format_name        = "raw",
 
-    /* It's really 0, but we need to make qemu_malloc() happy */
+    /* It's really 0, but we need to make g_malloc() happy */
     .instance_size      = 1,
 
     .bdrv_open          = raw_open,
     .bdrv_close         = raw_close,
-    .bdrv_read          = raw_read,
-    .bdrv_write         = raw_write,
-    .bdrv_flush         = raw_flush,
+
+    .bdrv_reopen_prepare  = raw_reopen_prepare,
+
+    .bdrv_co_readv          = raw_co_readv,
+    .bdrv_co_writev         = raw_co_writev,
+    .bdrv_co_is_allocated   = raw_co_is_allocated,
+    .bdrv_co_write_zeroes   = raw_co_write_zeroes,
+    .bdrv_co_discard        = raw_co_discard,
+
     .bdrv_probe         = raw_probe,
     .bdrv_getlength     = raw_getlength,
+    .bdrv_get_info      = raw_get_info,
     .bdrv_truncate      = raw_truncate,
 
-    .bdrv_aio_readv     = raw_aio_readv,
-    .bdrv_aio_writev    = raw_aio_writev,
-    .bdrv_aio_flush     = raw_aio_flush,
-    .bdrv_discard       = raw_discard,
-
     .bdrv_is_inserted   = raw_is_inserted,
+    .bdrv_media_changed = raw_media_changed,
     .bdrv_eject         = raw_eject,
-    .bdrv_set_locked    = raw_set_locked,
+    .bdrv_lock_medium   = raw_lock_medium,
+
     .bdrv_ioctl         = raw_ioctl,
     .bdrv_aio_ioctl     = raw_aio_ioctl,
 

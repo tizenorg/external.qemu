@@ -1,0 +1,29 @@
+From: Bruce Rogers <brogers@suse.com>
+Date: Thu, 16 May 2013 12:39:10 +0200
+Subject: virtfs-proxy-helper: Provide __u64 for broken sys/capability.h
+
+Fixes the build on SLE 11 SP2.
+
+[AF: Extend to ppc64]
+---
+ fsdev/virtfs-proxy-helper.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/fsdev/virtfs-proxy-helper.c b/fsdev/virtfs-proxy-helper.c
+index 713a7b2..b8da77d 100644
+--- a/fsdev/virtfs-proxy-helper.c
++++ b/fsdev/virtfs-proxy-helper.c
+@@ -9,6 +9,13 @@
+  * the COPYING file in the top-level directory.
+  */
+ 
++/* work around a broken sys/capability.h */
++#if defined(__i386__)
++typedef unsigned long long __u64;
++#endif
++#if defined(__powerpc64__)
++#include <asm/types.h>
++#endif
+ #include <sys/resource.h>
+ #include <getopt.h>
+ #include <syslog.h>

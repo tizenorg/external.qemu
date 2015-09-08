@@ -13,7 +13,7 @@ import sys
 import re
 
 # Functions that change stacks
-STACKHOP = ['__send_disk_op']
+STACKHOP = ['stack_hop', 'stack_hop_back']
 # List of functions we can assume are never called.
 #IGNORE = ['panic', '__dprintf']
 IGNORE = ['panic']
@@ -140,16 +140,16 @@ def calc():
 
             im = re_usestack.match(insn)
             if im is not None:
-                if insn[:5] == 'pushl' or insn[:6] == 'pushfl':
+                if insn.startswith('pushl') or insn.startswith('pushfl'):
                     stackusage += 4
                     continue
-                elif insn[:5] == 'pushw' or insn[:6] == 'pushfw':
+                elif insn.startswith('pushw') or insn.startswith('pushfw'):
                     stackusage += 2
                     continue
                 stackusage += int(im.group('num'), 16)
 
             if atstart:
-                if insn == 'movl   %esp,%ebp':
+                if '%esp' in insn or insn.startswith('leal'):
                     # Still part of initial header
                     continue
                 cur[1] = stackusage
@@ -158,13 +158,13 @@ def calc():
             insnaddr = m.group('insnaddr')
             calladdr = m.group('calladdr')
             if calladdr is None:
-                if insn[:6] == 'lcallw':
+                if insn.startswith('lcallw'):
                     noteCall(cur, subfuncs, insnaddr, -1, stackusage + 4)
                     noteYield(cur, stackusage + 4)
-                elif insn[:3] == 'int':
+                elif insn.startswith('int'):
                     noteCall(cur, subfuncs, insnaddr, -1, stackusage + 6)
                     noteYield(cur, stackusage + 6)
-                elif insn[:3] == 'sti':
+                elif insn.startswith('sti'):
                     noteYield(cur, stackusage)
                 else:
                     # misc instruction
@@ -176,10 +176,10 @@ def calc():
                 if '+' in ref:
                     # Inter-function jump.
                     pass
-                elif insn[:1] == 'j':
+                elif insn.startswith('j'):
                     # Tail call
                     noteCall(cur, subfuncs, insnaddr, calladdr, 0)
-                elif insn[:5] == 'calll':
+                elif insn.startswith('calll'):
                     noteCall(cur, subfuncs, insnaddr, calladdr, stackusage + 4)
                 else:
                     print "unknown call", ref

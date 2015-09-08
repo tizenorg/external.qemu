@@ -1,0 +1,23 @@
+From: Junfeng Dong <junfeng.dong@intel.com>
+Date: Tue, 19 Nov 2013 19:14:41 +0800
+Subject: enable 32 bit qemu for Tizen.
+
+Change-Id: I75ecb5ef6952d1083c030f5e48ba2a24e4d6f4a1
+Signed-off-by: Junfeng Dong <junfeng.dong@intel.com>
+---
+ linux-user/binfmt.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/linux-user/binfmt.c b/linux-user/binfmt.c
+index 87dc4c6..170cc19 100644
+--- a/linux-user/binfmt.c
++++ b/linux-user/binfmt.c
+@@ -7,6 +7,8 @@
+ 
+ #ifdef __x86_64__
+ #define ARCH_NAME "x86_64"
++#elif defined __i386__
++#define ARCH_NAME "i586"
+ #endif
+ 
+ int main(int argc, char **argv, char **envp)

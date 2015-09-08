@@ -1,0 +1,14 @@
+* Wed Aug 28 2013 Anas Nashif <anas.nashif@intel.com> submit/tizen/20130828.112706@2c24165
+- add baselibs.conf
+- fixed group and license
+- resetting manifest requested domain to floor
+
+* Sat May 11 2013 Anas Nashif <anas.nashif@intel.com> submit/tizen/20130509.183841@5388c0d
+- Set license using %license
+
+* Wed Apr 17 2013 Patrick McCarty <patrick.mccarty@linux.intel.com> 1127a7e
+- (TZPC-970) Enable SDL display support
+
+* Tue Jan 15 2013 Anas Nashif <anas.nashif@intel.com> upstream/1.3.0@4698b64
+- Update to 1.3
+

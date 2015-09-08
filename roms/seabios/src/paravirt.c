@@ -8,7 +8,8 @@
 // This file may be distributed under the terms of the GNU LGPLv3 license.
 
 #include "config.h" // CONFIG_COREBOOT
-#include "util.h" // ntoh[ls]
+#include "util.h" // dprintf
+#include "byteorder.h" // be32_to_cpu
 #include "ioport.h" // outw
 #include "paravirt.h" // qemu_cfg_port_probe
 #include "smbios.h" // struct smbios_structure_header
@@ -305,55 +306,44 @@ u16 qemu_cfg_get_max_cpus(void)
     return cnt;
 }
 
-static QemuCfgFile LastFile;
-
-static u32
-__cfg_next_prefix_file(const char *prefix, int prefixlen, u32 prevselect)
+int qemu_cfg_read_file(struct romfile_s *file, void *dst, u32 maxlen)
 {
-    if (!qemu_cfg_present)
-        return 0;
+    if (file->size > maxlen)
+        return -1;
+    qemu_cfg_read_entry(dst, file->id, file->size);
+    return file->size;
+}
+
+struct QemuCfgFile {
+    u32  size;        /* file size */
+    u16  select;      /* write this to 0x510 to read it */
+    u16  reserved;
+    char name[56];
+};
+
+void qemu_cfg_romfile_setup(void)
+{
+    if (CONFIG_COREBOOT || !qemu_cfg_present)
+        return;
 
     u32 count;
     qemu_cfg_read_entry(&count, QEMU_CFG_FILE_DIR, sizeof(count));
-    count = ntohl(count);
+    count = be32_to_cpu(count);
     u32 e;
     for (e = 0; e < count; e++) {
-        qemu_cfg_read((void*)&LastFile, sizeof(LastFile));
-        u32 select = ntohs(LastFile.select);
-        if (select <= prevselect)
-            continue;
-        if (memcmp(prefix, LastFile.name, prefixlen) == 0)
-            return select;
+        struct QemuCfgFile qfile;
+        qemu_cfg_read((void*)&qfile, sizeof(qfile));
+        struct romfile_s *file = malloc_tmp(sizeof(*file));
+        if (!file) {
+            warn_noalloc();
+            return;
+        }
+        memset(file, 0, sizeof(*file));
+        strtcpy(file->name, qfile.name, sizeof(file->name));
+        file->size = be32_to_cpu(qfile.size);
+        file->id = be16_to_cpu(qfile.select);
+        file->copy = qemu_cfg_read_file;
+        romfile_add(file);
+        dprintf(3, "Found fw_cfg file: %s (size=%d)\n", file->name, file->size);
     }
-    return 0;
-}
-
-u32 qemu_cfg_next_prefix_file(const char *prefix, u32 prevselect)
-{
-    return __cfg_next_prefix_file(prefix, strlen(prefix), prevselect);
-}
-
-u32 qemu_cfg_find_file(const char *name)
-{
-    return __cfg_next_prefix_file(name, strlen(name) + 1, 0);
-}
-
-int qemu_cfg_size_file(u32 select)
-{
-    if (select != ntohs(LastFile.select))
-        return -1;
-    return ntohl(LastFile.size);
-}
-
-int qemu_cfg_read_file(u32 select, void *dst, u32 maxlen)
-{
-    if (!qemu_cfg_present)
-        return -1;
-    if (!select || select != ntohs(LastFile.select))
-        return -1;
-    int len = qemu_cfg_size_file(select);
-    if (len < 0 || len > maxlen)
-        return -1;
-    qemu_cfg_read_entry(dst, select, len);
-    return len;
 }

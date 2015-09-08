@@ -1,0 +1,54 @@
+From: Michael Brown <mcb30@ipxe.org>
+Date: Fri, 7 Jun 2013 13:46:27 +0100
+Subject: Work around bug in gcc >= 4.8
+
+gcc 4.8 and 4.9 fail to compile pxe_call.c with the error "bp cannot
+be used in asm here".  Other points in the codebase which use "ebp" in
+the asm clobber list do not seem to be affected.
+
+Unfortunately gcc provides no way to specify %ebp as an output
+register, so we cannot use this as a workaround.  The only viable
+solution is to explicitly push/pop %ebp within the asm itself.  This
+is ugly for two reasons: firstly, it may be unnecessary; secondly, it
+may cause gcc to generate invalid %esp-relative addresses if the asm
+happens to use memory operands.  This specific block of asm uses no
+memory operands and so will not generate invalid code.
+
+Reported-by: Daniel P. Berrange <berrange@redhat.com>
+Reported-by: Christian Hesse <list@eworm.de>
+Originally-fixed-by: Christian Hesse <list@eworm.de>
+Signed-off-by: Michael Brown <mcb30@ipxe.org>
+---
+ roms/ipxe/src/arch/i386/interface/pxe/pxe_call.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/roms/ipxe/src/arch/i386/interface/pxe/pxe_call.c b/roms/ipxe/src/arch/i386/interface/pxe/pxe_call.c
+index b8e73a0..80cdf3a 100644
+--- a/roms/ipxe/src/arch/i386/interface/pxe/pxe_call.c
++++ b/roms/ipxe/src/arch/i386/interface/pxe/pxe_call.c
+@@ -265,12 +265,14 @@ int pxe_start_nbp ( void ) {
+ 		DBG ( "Restarting NBP (%x)\n", jmp );
+ 
+ 	/* Far call to PXE NBP */
+-	__asm__ __volatile__ ( REAL_CODE ( "movw %%cx, %%es\n\t"
++	__asm__ __volatile__ ( REAL_CODE ( "pushl %%ebp\n\t" /* gcc bug */
++					   "movw %%cx, %%es\n\t"
+ 					   "pushw %%es\n\t"
+ 					   "pushw %%di\n\t"
+ 					   "sti\n\t"
+ 					   "lcall $0, $0x7c00\n\t"
+-					   "addw $4, %%sp\n\t" )
++					   "popl %%ebp\n\t" /* discard */
++					   "popl %%ebp\n\t" /* gcc bug */ )
+ 			       : "=a" ( rc ), "=b" ( discard_b ),
+ 				 "=c" ( discard_c ), "=d" ( discard_d ),
+ 				 "=D" ( discard_D )
+@@ -278,7 +280,7 @@ int pxe_start_nbp ( void ) {
+ 			         "c" ( rm_cs ),
+ 			         "d" ( virt_to_phys ( &pxenv ) ),
+ 				 "D" ( __from_text16 ( &ppxe ) )
+-			       : "esi", "ebp", "memory" );
++			       : "esi", "memory" );
+ 
+ 	return rc;
+ }

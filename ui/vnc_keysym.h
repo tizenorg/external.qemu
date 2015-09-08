@@ -202,6 +202,28 @@ static const name2keysym_t name2keysym[]={
 { "ydiaeresis",           0x0ff},
 {"EuroSign", 0x20ac},  /* XK_EuroSign */
 
+/* latin 2 - Polish national characters */
+{ "eogonek",              0x1ea},
+{ "Eogonek",              0x1ca},
+{ "aogonek",              0x1b1},
+{ "Aogonek",              0x1a1},
+{ "sacute",               0x1b6},
+{ "Sacute",               0x1a6},
+{ "lstroke",              0x1b3},
+{ "Lstroke",              0x1a3},
+{ "zabovedot",            0x1bf},
+{ "Zabovedot",            0x1af},
+{ "zacute",               0x1bc},
+{ "Zacute",               0x1ac},
+{ "Odoubleacute",         0x1d5},
+{ "Udoubleacute",         0x1db},
+{ "cacute",               0x1e6},
+{ "Cacute",               0x1c6},
+{ "nacute",               0x1f1},
+{ "Nacute",               0x1d1},
+{ "odoubleacute",         0x1f5},
+{ "udoubleacute",         0x1fb},
+
     /* modifiers */
 {"ISO_Level3_Shift", 0xfe03}, /* XK_ISO_Level3_Shift */
 {"Control_L", 0xffe3}, /* XK_Control_L */

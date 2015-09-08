@@ -28,7 +28,15 @@
 
 #include "config-host.h"
 
+/* This needs to be before jpeglib.h line because of conflict with
+   INT32 definitions between jmorecfg.h (included by jpeglib.h) and
+   Win32 basetsd.h (included by windows.h). */
+#include "qemu-common.h"
+
 #ifdef CONFIG_VNC_PNG
+/* The following define is needed by pngconf.h. Otherwise it won't compile,
+   because setjmp.h was already included by qemu-common.h. */
+#define PNG_SKIP_SETJMP_CHECK
 #include <png.h>
 #endif
 #ifdef CONFIG_VNC_JPEG
@@ -36,10 +44,8 @@
 #include <jpeglib.h>
 #endif
 
-#include "qemu-common.h"
-
-#include "bswap.h"
-#include "qint.h"
+#include "qemu/bswap.h"
+#include "qapi/qmp/qint.h"
 #include "vnc.h"
 #include "vnc-enc-tight.h"
 #include "vnc-palette.h"
@@ -72,6 +78,26 @@ static const struct {
 static int tight_send_framebuffer_update(VncState *vs, int x, int y,
                                          int w, int h);
 
+#ifdef CONFIG_VNC_JPEG
+static const struct {
+    double jpeg_freq_min;       /* Don't send JPEG if the freq is bellow */
+    double jpeg_freq_threshold; /* Always send JPEG if the freq is above */
+    int jpeg_idx;               /* Allow indexed JPEG */
+    int jpeg_full;              /* Allow full color JPEG */
+} tight_jpeg_conf[] = {
+    { 0,   8,  1, 1 },
+    { 0,   8,  1, 1 },
+    { 0,   8,  1, 1 },
+    { 0,   8,  1, 1 },
+    { 0,   10, 1, 1 },
+    { 0.1, 10, 1, 1 },
+    { 0.2, 10, 1, 1 },
+    { 0.3, 12, 0, 0 },
+    { 0.4, 14, 0, 0 },
+    { 0.5, 16, 0, 0 },
+};
+#endif
+
 #ifdef CONFIG_VNC_PNG
 static const struct {
     int png_zlib_level, png_filters;
@@ -97,8 +123,8 @@ static bool tight_can_send_png_rect(VncState *vs, int w, int h)
         return false;
     }
 
-    if (ds_get_bytes_per_pixel(vs->ds) == 1 ||
-        vs->clientds.pf.bytes_per_pixel == 1) {
+    if (surface_bytes_per_pixel(vs->vd->ds) == 1 ||
+        vs->client_pf.bytes_per_pixel == 1) {
         return false;
     }
 
@@ -127,7 +153,7 @@ tight_detect_smooth_image24(VncState *vs, int w, int h)
      * If client is big-endian, color samples begin from the second
      * byte (offset 1) of a 32-bit pixel value.
      */
-    off = !!(vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG);
+    off = vs->client_be;
 
     memset(stats, 0, sizeof (stats));
 
@@ -190,16 +216,16 @@ tight_detect_smooth_image24(VncState *vs, int w, int h)
         unsigned int errors;                                            \
         unsigned char *buf = vs->tight.tight.buffer;                    \
                                                                         \
-        endian = ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) !=        \
-                  (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG));     \
+        endian = 0; /* FIXME: ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) != \
+                      (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)); */ \
                                                                         \
                                                                         \
-        max[0] = vs->clientds.pf.rmax;                                  \
-        max[1] = vs->clientds.pf.gmax;                                  \
-        max[2] = vs->clientds.pf.bmax;                                  \
-        shift[0] = vs->clientds.pf.rshift;                              \
-        shift[1] = vs->clientds.pf.gshift;                              \
-        shift[2] = vs->clientds.pf.bshift;                              \
+        max[0] = vs->client_pf.rmax;                                  \
+        max[1] = vs->client_pf.gmax;                                  \
+        max[2] = vs->client_pf.bmax;                                  \
+        shift[0] = vs->client_pf.rshift;                              \
+        shift[1] = vs->client_pf.gshift;                              \
+        shift[2] = vs->client_pf.bshift;                              \
                                                                         \
         memset(stats, 0, sizeof(stats));                                \
                                                                         \
@@ -275,8 +301,8 @@ tight_detect_smooth_image(VncState *vs, int w, int h)
         return 0;
     }
 
-    if (ds_get_bytes_per_pixel(vs->ds) == 1 ||
-        vs->clientds.pf.bytes_per_pixel == 1 ||
+    if (surface_bytes_per_pixel(vs->vd->ds) == 1 ||
+        vs->client_pf.bytes_per_pixel == 1 ||
         w < VNC_TIGHT_DETECT_MIN_WIDTH || h < VNC_TIGHT_DETECT_MIN_HEIGHT) {
         return 0;
     }
@@ -291,7 +317,7 @@ tight_detect_smooth_image(VncState *vs, int w, int h)
         }
     }
 
-    if (vs->clientds.pf.bytes_per_pixel == 4) {
+    if (vs->client_pf.bytes_per_pixel == 4) {
         if (vs->tight.pixel24) {
             errors = tight_detect_smooth_image24(vs, w, h);
             if (vs->tight.quality != (uint8_t)-1) {
@@ -404,7 +430,7 @@ static int tight_fill_palette(VncState *vs, int x, int y,
         max = 256;
     }
 
-    switch(vs->clientds.pf.bytes_per_pixel) {
+    switch (vs->client_pf.bytes_per_pixel) {
     case 4:
         return tight_fill_palette32(vs, x, y, max, count, bg, fg, palette);
     case 2:
@@ -531,15 +557,15 @@ tight_filter_gradient24(VncState *vs, uint8_t *buf, int w, int h)
     buf32 = (uint32_t *)buf;
     memset(vs->tight.gradient.buffer, 0, w * 3 * sizeof(int));
 
-    if ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
-        (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)) {
-        shift[0] = vs->clientds.pf.rshift;
-        shift[1] = vs->clientds.pf.gshift;
-        shift[2] = vs->clientds.pf.bshift;
+    if (1 /* FIXME: (vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
+             (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG) */) {
+        shift[0] = vs->client_pf.rshift;
+        shift[1] = vs->client_pf.gshift;
+        shift[2] = vs->client_pf.bshift;
     } else {
-        shift[0] = 24 - vs->clientds.pf.rshift;
-        shift[1] = 24 - vs->clientds.pf.gshift;
-        shift[2] = 24 - vs->clientds.pf.bshift;
+        shift[0] = 24 - vs->client_pf.rshift;
+        shift[1] = 24 - vs->client_pf.gshift;
+        shift[2] = 24 - vs->client_pf.bshift;
     }
 
     for (y = 0; y < h; y++) {
@@ -589,15 +615,15 @@ tight_filter_gradient24(VncState *vs, uint8_t *buf, int w, int h)
                                                                         \
         memset (vs->tight.gradient.buffer, 0, w * 3 * sizeof(int));     \
                                                                         \
-        endian = ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) !=        \
-                  (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG));     \
+        endian = 0; /* FIXME: ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) != \
+                       (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)); */ \
                                                                         \
-        max[0] = vs->clientds.pf.rmax;                                  \
-        max[1] = vs->clientds.pf.gmax;                                  \
-        max[2] = vs->clientds.pf.bmax;                                  \
-        shift[0] = vs->clientds.pf.rshift;                              \
-        shift[1] = vs->clientds.pf.gshift;                              \
-        shift[2] = vs->clientds.pf.bshift;                              \
+        max[0] = vs->client_pf.rmax;                                    \
+        max[1] = vs->client_pf.gmax;                                    \
+        max[2] = vs->client_pf.bmax;                                    \
+        shift[0] = vs->client_pf.rshift;                                \
+        shift[1] = vs->client_pf.gshift;                                \
+        shift[2] = vs->client_pf.bshift;                                \
                                                                         \
         for (y = 0; y < h; y++) {                                       \
             for (c = 0; c < 3; c++) {                                   \
@@ -645,56 +671,42 @@ DEFINE_GRADIENT_FILTER_FUNCTION(32)
  * that case new color will be stored in *colorPtr.
  */
 
-#define DEFINE_CHECK_SOLID_FUNCTION(bpp)                                \
-                                                                        \
-    static bool                                                         \
-    check_solid_tile##bpp(VncState *vs, int x, int y, int w, int h,     \
-                          uint32_t* color, bool samecolor)              \
-    {                                                                   \
-        VncDisplay *vd = vs->vd;                                        \
-        uint##bpp##_t *fbptr;                                           \
-        uint##bpp##_t c;                                                \
-        int dx, dy;                                                     \
-                                                                        \
-        fbptr = (uint##bpp##_t *)                                       \
-            (vd->server->data + y * ds_get_linesize(vs->ds) +           \
-             x * ds_get_bytes_per_pixel(vs->ds));                       \
-                                                                        \
-        c = *fbptr;                                                     \
-        if (samecolor && (uint32_t)c != *color) {                       \
-            return false;                                               \
-        }                                                               \
-                                                                        \
-        for (dy = 0; dy < h; dy++) {                                    \
-            for (dx = 0; dx < w; dx++) {                                \
-                if (c != fbptr[dx]) {                                   \
-                    return false;                                       \
-                }                                                       \
-            }                                                           \
-            fbptr = (uint##bpp##_t *)                                   \
-                ((uint8_t *)fbptr + ds_get_linesize(vs->ds));           \
-        }                                                               \
-                                                                        \
-        *color = (uint32_t)c;                                           \
-        return true;                                                    \
+static bool
+check_solid_tile32(VncState *vs, int x, int y, int w, int h,
+                   uint32_t *color, bool samecolor)
+{
+    VncDisplay *vd = vs->vd;
+    uint32_t *fbptr;
+    uint32_t c;
+    int dx, dy;
+
+    fbptr = vnc_server_fb_ptr(vd, x, y);
+
+    c = *fbptr;
+    if (samecolor && (uint32_t)c != *color) {
+        return false;
     }
 
-DEFINE_CHECK_SOLID_FUNCTION(32)
-DEFINE_CHECK_SOLID_FUNCTION(16)
-DEFINE_CHECK_SOLID_FUNCTION(8)
+    for (dy = 0; dy < h; dy++) {
+        for (dx = 0; dx < w; dx++) {
+            if (c != fbptr[dx]) {
+                return false;
+            }
+        }
+        fbptr = (uint32_t *)
+            ((uint8_t *)fbptr + vnc_server_fb_stride(vd));
+    }
+
+    *color = (uint32_t)c;
+    return true;
+}
 
 static bool check_solid_tile(VncState *vs, int x, int y, int w, int h,
                              uint32_t* color, bool samecolor)
 {
-    VncDisplay *vd = vs->vd;
-
-    switch(vd->server->pf.bytes_per_pixel) {
+    switch (VNC_SERVER_FB_BYTES) {
     case 4:
         return check_solid_tile32(vs, x, y, w, h, color, samecolor);
-    case 2:
-        return check_solid_tile16(vs, x, y, w, h, color, samecolor);
-    default:
-        return check_solid_tile8(vs, x, y, w, h, color, samecolor);
     }
 }
 
@@ -880,15 +892,15 @@ static void tight_pack24(VncState *vs, uint8_t *buf, size_t count, size_t *ret)
 
     buf32 = (uint32_t *)buf;
 
-    if ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
-        (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)) {
-        rshift = vs->clientds.pf.rshift;
-        gshift = vs->clientds.pf.gshift;
-        bshift = vs->clientds.pf.bshift;
+    if (1 /* FIXME: (vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
+             (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG) */) {
+        rshift = vs->client_pf.rshift;
+        gshift = vs->client_pf.gshift;
+        bshift = vs->client_pf.bshift;
     } else {
-        rshift = 24 - vs->clientds.pf.rshift;
-        gshift = 24 - vs->clientds.pf.gshift;
-        bshift = 24 - vs->clientds.pf.bshift;
+        rshift = 24 - vs->client_pf.rshift;
+        gshift = 24 - vs->client_pf.gshift;
+        bshift = 24 - vs->client_pf.bshift;
     }
 
     if (ret) {
@@ -920,7 +932,7 @@ static int send_full_color_rect(VncState *vs, int x, int y, int w, int h)
         tight_pack24(vs, vs->tight.tight.buffer, w * h, &vs->tight.tight.offset);
         bytes = 3;
     } else {
-        bytes = vs->clientds.pf.bytes_per_pixel;
+        bytes = vs->client_pf.bytes_per_pixel;
     }
 
     bytes = tight_compress_data(vs, stream, w * h * bytes,
@@ -940,7 +952,7 @@ static int send_solid_rect(VncState *vs)
         tight_pack24(vs, vs->tight.tight.buffer, 1, &vs->tight.tight.offset);
         bytes = 3;
     } else {
-        bytes = vs->clientds.pf.bytes_per_pixel;
+        bytes = vs->client_pf.bytes_per_pixel;
     }
 
     vnc_write(vs, vs->tight.tight.buffer, bytes);
@@ -957,7 +969,7 @@ static int send_mono_rect(VncState *vs, int x, int y,
 #ifdef CONFIG_VNC_PNG
     if (tight_can_send_png_rect(vs, w, h)) {
         int ret;
-        int bpp = vs->clientds.pf.bytes_per_pixel * 8;
+        int bpp = vs->client_pf.bytes_per_pixel * 8;
         VncPalette *palette = palette_new(2, bpp);
 
         palette_put(palette, bg);
@@ -974,7 +986,7 @@ static int send_mono_rect(VncState *vs, int x, int y,
     vnc_write_u8(vs, VNC_TIGHT_FILTER_PALETTE);
     vnc_write_u8(vs, 1);
 
-    switch(vs->clientds.pf.bytes_per_pixel) {
+    switch (vs->client_pf.bytes_per_pixel) {
     case 4:
     {
         uint32_t buf[2] = {bg, fg};
@@ -1017,7 +1029,7 @@ static void write_palette(int idx, uint32_t color, void *opaque)
 {
     struct palette_cb_priv *priv = opaque;
     VncState *vs = priv->vs;
-    uint32_t bytes = vs->clientds.pf.bytes_per_pixel;
+    uint32_t bytes = vs->client_pf.bytes_per_pixel;
 
     if (bytes == 4) {
         ((uint32_t*)priv->header)[idx] = color;
@@ -1032,8 +1044,9 @@ static bool send_gradient_rect(VncState *vs, int x, int y, int w, int h)
     int level = tight_conf[vs->tight.compression].gradient_zlib_level;
     ssize_t bytes;
 
-    if (vs->clientds.pf.bytes_per_pixel == 1)
+    if (vs->client_pf.bytes_per_pixel == 1) {
         return send_full_color_rect(vs, x, y, w, h);
+    }
 
     vnc_write_u8(vs, (stream | VNC_TIGHT_EXPLICIT_FILTER) << 4);
     vnc_write_u8(vs, VNC_TIGHT_FILTER_GRADIENT);
@@ -1043,7 +1056,7 @@ static bool send_gradient_rect(VncState *vs, int x, int y, int w, int h)
     if (vs->tight.pixel24) {
         tight_filter_gradient24(vs, vs->tight.tight.buffer, w, h);
         bytes = 3;
-    } else if (vs->clientds.pf.bytes_per_pixel == 4) {
+    } else if (vs->client_pf.bytes_per_pixel == 4) {
         tight_filter_gradient32(vs, (uint32_t *)vs->tight.tight.buffer, w, h);
         bytes = 4;
     } else {
@@ -1081,7 +1094,7 @@ static int send_palette_rect(VncState *vs, int x, int y,
     vnc_write_u8(vs, VNC_TIGHT_FILTER_PALETTE);
     vnc_write_u8(vs, colors - 1);
 
-    switch(vs->clientds.pf.bytes_per_pixel) {
+    switch (vs->client_pf.bytes_per_pixel) {
     case 4:
     {
         size_t old_offset, offset;
@@ -1121,79 +1134,6 @@ static int send_palette_rect(VncState *vs, int x, int y,
                                 level, Z_DEFAULT_STRATEGY);
     return (bytes >= 0);
 }
-
-#if defined(CONFIG_VNC_JPEG) || defined(CONFIG_VNC_PNG)
-static void rgb_prepare_row24(VncState *vs, uint8_t *dst, int x, int y,
-                              int count)
-{
-    VncDisplay *vd = vs->vd;
-    uint32_t *fbptr;
-    uint32_t pix;
-
-    fbptr = (uint32_t *)(vd->server->data + y * ds_get_linesize(vs->ds) +
-                         x * ds_get_bytes_per_pixel(vs->ds));
-
-    while (count--) {
-        pix = *fbptr++;
-        *dst++ = (uint8_t)(pix >> vs->ds->surface->pf.rshift);
-        *dst++ = (uint8_t)(pix >> vs->ds->surface->pf.gshift);
-        *dst++ = (uint8_t)(pix >> vs->ds->surface->pf.bshift);
-    }
-}
-
-#define DEFINE_RGB_GET_ROW_FUNCTION(bpp)                                \
-                                                                        \
-    static void                                                         \
-    rgb_prepare_row##bpp(VncState *vs, uint8_t *dst,                    \
-                         int x, int y, int count)                       \
-    {                                                                   \
-        VncDisplay *vd = vs->vd;                                        \
-        uint##bpp##_t *fbptr;                                           \
-        uint##bpp##_t pix;                                              \
-        int r, g, b;                                                    \
-                                                                        \
-        fbptr = (uint##bpp##_t *)                                       \
-            (vd->server->data + y * ds_get_linesize(vs->ds) +           \
-             x * ds_get_bytes_per_pixel(vs->ds));                       \
-                                                                        \
-        while (count--) {                                               \
-            pix = *fbptr++;                                             \
-                                                                        \
-            r = (int)((pix >> vs->ds->surface->pf.rshift)               \
-                      & vs->ds->surface->pf.rmax);                      \
-            g = (int)((pix >> vs->ds->surface->pf.gshift)               \
-                      & vs->ds->surface->pf.gmax);                      \
-            b = (int)((pix >> vs->ds->surface->pf.bshift)               \
-                      & vs->ds->surface->pf.bmax);                      \
-                                                                        \
-            *dst++ = (uint8_t)((r * 255 + vs->ds->surface->pf.rmax / 2) \
-                               / vs->ds->surface->pf.rmax);             \
-            *dst++ = (uint8_t)((g * 255 + vs->ds->surface->pf.gmax / 2) \
-                               / vs->ds->surface->pf.gmax);             \
-            *dst++ = (uint8_t)((b * 255 + vs->ds->surface->pf.bmax / 2) \
-                               / vs->ds->surface->pf.bmax);             \
-        }                                                               \
-    }
-
-DEFINE_RGB_GET_ROW_FUNCTION(16)
-DEFINE_RGB_GET_ROW_FUNCTION(32)
-
-static void rgb_prepare_row(VncState *vs, uint8_t *dst, int x, int y,
-                            int count)
-{
-    if (ds_get_bytes_per_pixel(vs->ds) == 4) {
-        if (vs->ds->surface->pf.rmax == 0xFF &&
-            vs->ds->surface->pf.gmax == 0xFF &&
-            vs->ds->surface->pf.bmax == 0xFF) {
-            rgb_prepare_row24(vs, dst, x, y, count);
-        } else {
-            rgb_prepare_row32(vs, dst, x, y, count);
-        }
-    } else {
-        rgb_prepare_row16(vs, dst, x, y, count);
-    }
-}
-#endif /* CONFIG_VNC_JPEG or CONFIG_VNC_PNG */
 
 /*
  * JPEG compression stuff.
@@ -1239,12 +1179,14 @@ static int send_jpeg_rect(VncState *vs, int x, int y, int w, int h, int quality)
     struct jpeg_compress_struct cinfo;
     struct jpeg_error_mgr jerr;
     struct jpeg_destination_mgr manager;
+    pixman_image_t *linebuf;
     JSAMPROW row[1];
     uint8_t *buf;
     int dy;
 
-    if (ds_get_bytes_per_pixel(vs->ds) == 1)
+    if (surface_bytes_per_pixel(vs->vd->ds) == 1) {
         return send_full_color_rect(vs, x, y, w, h);
+    }
 
     buffer_reserve(&vs->tight.jpeg, 2048);
 
@@ -1267,13 +1209,14 @@ static int send_jpeg_rect(VncState *vs, int x, int y, int w, int h, int quality)
 
     jpeg_start_compress(&cinfo, true);
 
-    buf = qemu_malloc(w * 3);
+    linebuf = qemu_pixman_linebuf_create(PIXMAN_BE_r8g8b8, w);
+    buf = (uint8_t *)pixman_image_get_data(linebuf);
     row[0] = buf;
     for (dy = 0; dy < h; dy++) {
-        rgb_prepare_row(vs, buf, x, y + dy, w);
+        qemu_pixman_linebuf_fill(linebuf, vs->vd->server, w, x, y + dy);
         jpeg_write_scanlines(&cinfo, row, 1);
     }
-    qemu_free(buf);
+    qemu_pixman_image_unref(linebuf);
 
     jpeg_finish_compress(&cinfo);
     jpeg_destroy_compress(&cinfo);
@@ -1300,23 +1243,23 @@ static void write_png_palette(int idx, uint32_t pix, void *opaque)
 
     if (vs->tight.pixel24)
     {
-        color->red = (pix >> vs->clientds.pf.rshift) & vs->clientds.pf.rmax;
-        color->green = (pix >> vs->clientds.pf.gshift) & vs->clientds.pf.gmax;
-        color->blue = (pix >> vs->clientds.pf.bshift) & vs->clientds.pf.bmax;
+        color->red = (pix >> vs->client_pf.rshift) & vs->client_pf.rmax;
+        color->green = (pix >> vs->client_pf.gshift) & vs->client_pf.gmax;
+        color->blue = (pix >> vs->client_pf.bshift) & vs->client_pf.bmax;
     }
     else
     {
         int red, green, blue;
 
-        red = (pix >> vs->clientds.pf.rshift) & vs->clientds.pf.rmax;
-        green = (pix >> vs->clientds.pf.gshift) & vs->clientds.pf.gmax;
-        blue = (pix >> vs->clientds.pf.bshift) & vs->clientds.pf.bmax;
-        color->red = ((red * 255 + vs->clientds.pf.rmax / 2) /
-                      vs->clientds.pf.rmax);
-        color->green = ((green * 255 + vs->clientds.pf.gmax / 2) /
-                        vs->clientds.pf.gmax);
-        color->blue = ((blue * 255 + vs->clientds.pf.bmax / 2) /
-                       vs->clientds.pf.bmax);
+        red = (pix >> vs->client_pf.rshift) & vs->client_pf.rmax;
+        green = (pix >> vs->client_pf.gshift) & vs->client_pf.gmax;
+        blue = (pix >> vs->client_pf.bshift) & vs->client_pf.bmax;
+        color->red = ((red * 255 + vs->client_pf.rmax / 2) /
+                      vs->client_pf.rmax);
+        color->green = ((green * 255 + vs->client_pf.gmax / 2) /
+                        vs->client_pf.gmax);
+        color->blue = ((blue * 255 + vs->client_pf.bmax / 2) /
+                       vs->client_pf.bmax);
     }
 }
 
@@ -1337,12 +1280,12 @@ static void png_flush_data(png_structp png_ptr)
 
 static void *vnc_png_malloc(png_structp png_ptr, png_size_t size)
 {
-    return qemu_malloc(size);
+    return g_malloc(size);
 }
 
 static void vnc_png_free(png_structp png_ptr, png_voidp ptr)
 {
-    qemu_free(ptr);
+    g_free(ptr);
 }
 
 static int send_png_rect(VncState *vs, int x, int y, int w, int h,
@@ -1352,6 +1295,7 @@ static int send_png_rect(VncState *vs, int x, int y, int w, int h,
     png_structp png_ptr;
     png_infop info_ptr;
     png_colorp png_palette = NULL;
+    pixman_image_t *linebuf;
     int level = tight_png_conf[vs->tight.compression].png_zlib_level;
     int filters = tight_png_conf[vs->tight.compression].png_filters;
     uint8_t *buf;
@@ -1396,7 +1340,7 @@ static int send_png_rect(VncState *vs, int x, int y, int w, int h,
 
         png_set_PLTE(png_ptr, info_ptr, png_palette, palette_size(palette));
 
-        if (vs->clientds.pf.bytes_per_pixel == 4) {
+        if (vs->client_pf.bytes_per_pixel == 4) {
             tight_encode_indexed_rect32(vs->tight.tight.buffer, w * h, palette);
         } else {
             tight_encode_indexed_rect16(vs->tight.tight.buffer, w * h, palette);
@@ -1406,17 +1350,18 @@ static int send_png_rect(VncState *vs, int x, int y, int w, int h,
     png_write_info(png_ptr, info_ptr);
 
     buffer_reserve(&vs->tight.png, 2048);
-    buf = qemu_malloc(w * 3);
+    linebuf = qemu_pixman_linebuf_create(PIXMAN_BE_r8g8b8, w);
+    buf = (uint8_t *)pixman_image_get_data(linebuf);
     for (dy = 0; dy < h; dy++)
     {
         if (color_type == PNG_COLOR_TYPE_PALETTE) {
             memcpy(buf, vs->tight.tight.buffer + (dy * w), w);
         } else {
-            rgb_prepare_row(vs, buf, x, y + dy, w);
+            qemu_pixman_linebuf_fill(linebuf, vs->vd->server, w, x, y + dy);
         }
         png_write_row(png_ptr, buf);
     }
-    qemu_free(buf);
+    qemu_pixman_image_unref(linebuf);
 
     png_write_end(png_ptr, NULL);
 
@@ -1477,12 +1422,13 @@ static int send_sub_rect_nojpeg(VncState *vs, int x, int y, int w, int h,
 #ifdef CONFIG_VNC_JPEG
 static int send_sub_rect_jpeg(VncState *vs, int x, int y, int w, int h,
                               int bg, int fg, int colors,
-                              VncPalette *palette)
+                              VncPalette *palette, bool force)
 {
     int ret;
 
     if (colors == 0) {
-        if (tight_detect_smooth_image(vs, w, h)) {
+        if (force || (tight_jpeg_conf[vs->tight.quality].jpeg_full &&
+                      tight_detect_smooth_image(vs, w, h))) {
             int quality = tight_conf[vs->tight.quality].jpeg_quality;
 
             ret = send_jpeg_rect(vs, x, y, w, h, quality);
@@ -1494,8 +1440,9 @@ static int send_sub_rect_jpeg(VncState *vs, int x, int y, int w, int h,
     } else if (colors == 2) {
         ret = send_mono_rect(vs, x, y, w, h, bg, fg);
     } else if (colors <= 256) {
-        if (colors > 96 &&
-            tight_detect_smooth_image(vs, w, h)) {
+        if (force || (colors > 96 &&
+                      tight_jpeg_conf[vs->tight.quality].jpeg_idx &&
+                      tight_detect_smooth_image(vs, w, h))) {
             int quality = tight_conf[vs->tight.quality].jpeg_quality;
 
             ret = send_jpeg_rect(vs, x, y, w, h, quality);
@@ -1515,6 +1462,10 @@ static int send_sub_rect(VncState *vs, int x, int y, int w, int h)
     uint32_t bg = 0, fg = 0;
     int colors;
     int ret = 0;
+#ifdef CONFIG_VNC_JPEG
+    bool force_jpeg = false;
+    bool allow_jpeg = true;
+#endif
 
     vnc_framebuffer_update(vs, x, y, w, h, vs->tight.type);
 
@@ -1522,11 +1473,26 @@ static int send_sub_rect(VncState *vs, int x, int y, int w, int h)
     vnc_raw_send_framebuffer_update(vs, x, y, w, h);
     vnc_tight_stop(vs);
 
+#ifdef CONFIG_VNC_JPEG
+    if (!vs->vd->non_adaptive && vs->tight.quality != (uint8_t)-1) {
+        double freq = vnc_update_freq(vs, x, y, w, h);
+
+        if (freq < tight_jpeg_conf[vs->tight.quality].jpeg_freq_min) {
+            allow_jpeg = false;
+        }
+        if (freq >= tight_jpeg_conf[vs->tight.quality].jpeg_freq_threshold) {
+            force_jpeg = true;
+            vnc_sent_lossy_rect(vs, x, y, w, h);
+        }
+    }
+#endif
+
     colors = tight_fill_palette(vs, x, y, w * h, &fg, &bg, &palette);
 
 #ifdef CONFIG_VNC_JPEG
-    if (vs->tight.quality != (uint8_t)-1) {
-        ret = send_sub_rect_jpeg(vs, x, y, w, h, bg, fg, colors, palette);
+    if (allow_jpeg && vs->tight.quality != (uint8_t)-1) {
+        ret = send_sub_rect_jpeg(vs, x, y, w, h, bg, fg, colors, palette,
+                                 force_jpeg);
     } else {
         ret = send_sub_rect_nojpeg(vs, x, y, w, h, bg, fg, colors, palette);
     }
@@ -1549,7 +1515,8 @@ static int send_sub_rect_solid(VncState *vs, int x, int y, int w, int h)
     return send_solid_rect(vs);
 }
 
-static int send_rect_simple(VncState *vs, int x, int y, int w, int h)
+static int send_rect_simple(VncState *vs, int x, int y, int w, int h,
+                            bool split)
 {
     int max_size, max_width;
     int max_sub_width, max_sub_height;
@@ -1560,7 +1527,7 @@ static int send_rect_simple(VncState *vs, int x, int y, int w, int h)
     max_size = tight_conf[vs->tight.compression].max_rect_size;
     max_width = tight_conf[vs->tight.compression].max_rect_width;
 
-    if (w > max_width || w * h > max_size) {
+    if (split && (w > max_width || w * h > max_size)) {
         max_sub_width = (w > max_width) ? max_width : w;
         max_sub_height = max_size / max_sub_width;
 
@@ -1591,7 +1558,7 @@ static int find_large_solid_color_rect(VncState *vs, int x, int y,
         /* If a rectangle becomes too large, send its upper part now. */
 
         if (dy - y >= max_rows) {
-            n += send_rect_simple(vs, x, y, w, max_rows);
+            n += send_rect_simple(vs, x, y, w, max_rows, true);
             y += max_rows;
             h -= max_rows;
         }
@@ -1630,7 +1597,7 @@ static int find_large_solid_color_rect(VncState *vs, int x, int y,
             /* Send rectangles at top and left to solid-color area. */
 
             if (y_best != y) {
-                n += send_rect_simple(vs, x, y, w, y_best-y);
+                n += send_rect_simple(vs, x, y, w, y_best-y, true);
             }
             if (x_best != x) {
                 n += tight_send_framebuffer_update(vs, x, y_best,
@@ -1657,7 +1624,7 @@ static int find_large_solid_color_rect(VncState *vs, int x, int y,
             return n;
         }
     }
-    return n + send_rect_simple(vs, x, y, w, h);
+    return n + send_rect_simple(vs, x, y, w, h, true);
 }
 
 static int tight_send_framebuffer_update(VncState *vs, int x, int y,
@@ -1665,15 +1632,26 @@ static int tight_send_framebuffer_update(VncState *vs, int x, int y,
 {
     int max_rows;
 
-    if (vs->clientds.pf.bytes_per_pixel == 4 && vs->clientds.pf.rmax == 0xFF &&
-        vs->clientds.pf.bmax == 0xFF && vs->clientds.pf.gmax == 0xFF) {
+    if (vs->client_pf.bytes_per_pixel == 4 && vs->client_pf.rmax == 0xFF &&
+        vs->client_pf.bmax == 0xFF && vs->client_pf.gmax == 0xFF) {
         vs->tight.pixel24 = true;
     } else {
         vs->tight.pixel24 = false;
     }
 
-    if (w * h < VNC_TIGHT_MIN_SPLIT_RECT_SIZE)
-        return send_rect_simple(vs, x, y, w, h);
+#ifdef CONFIG_VNC_JPEG
+    if (vs->tight.quality != (uint8_t)-1) {
+        double freq = vnc_update_freq(vs, x, y, w, h);
+
+        if (freq > tight_jpeg_conf[vs->tight.quality].jpeg_freq_threshold) {
+            return send_rect_simple(vs, x, y, w, h, false);
+        }
+    }
+#endif
+
+    if (w * h < VNC_TIGHT_MIN_SPLIT_RECT_SIZE) {
+        return send_rect_simple(vs, x, y, w, h, true);
+    }
 
     /* Calculate maximum number of rows in one non-solid rectangle. */
 

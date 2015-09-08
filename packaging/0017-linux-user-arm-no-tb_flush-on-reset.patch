@@ -1,0 +1,30 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Tue, 29 May 2012 15:30:01 +0200
+Subject: linux-user: arm: no tb_flush on reset
+
+When running automoc4 as linux-user guest program, it segfaults right after
+it creates a thread. Bisecting pointed to commit a84fac1426 which introduces
+tb_flush on reset.
+
+So something in our thread creation is broken. But for now, let's revert the
+change to at least get a working build again.
+---
+ target-arm/cpu.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/target-arm/cpu.c b/target-arm/cpu.c
+index 5a7566b..40bddc3 100644
+--- a/target-arm/cpu.c
++++ b/target-arm/cpu.c
+@@ -126,7 +126,11 @@ static void arm_cpu_reset(CPUState *s)
+      * bake assumptions about into translated code, so we need to
+      * tb_flush().
+      */
++#if !defined(CONFIG_USER_ONLY)
++    /* XXX hack alert! automoc4 segaults after spawning a new thread with this
++           flush enabled */
+     tb_flush(env);
++#endif
+ }
+ 
+ static inline void set_feature(CPUARMState *env, int feature)

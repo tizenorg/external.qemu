@@ -136,7 +136,7 @@ tcp_reass(register struct tcpcb *tp, register struct tcpiphdr *ti,
 		i = q->ti_seq + q->ti_len - ti->ti_seq;
 		if (i > 0) {
 			if (i >= ti->ti_len) {
-				m_freem(m);
+				m_free(m);
 				/*
 				 * Try to present any queued data
 				 * at the left window edge to the user.
@@ -170,7 +170,7 @@ tcp_reass(register struct tcpcb *tp, register struct tcpiphdr *ti,
 		q = tcpiphdr_next(q);
 		m = tcpiphdr_prev(q)->ti_mbuf;
 		remque(tcpiphdr2qlink(tcpiphdr_prev(q)));
-		m_freem(m);
+		m_free(m);
 	}
 
 	/*
@@ -197,7 +197,7 @@ present:
 		m = ti->ti_mbuf;
 		ti = tcpiphdr_next(ti);
 		if (so->so_state & SS_FCANTSENDMORE)
-			m_freem(m);
+			m_free(m);
 		else {
 			if (so->so_emu) {
 				if (tcp_emu(so,m)) sbappend(so, m);
@@ -231,7 +231,7 @@ tcp_input(struct mbuf *m, int iphlen, struct socket *inso)
     Slirp *slirp;
 
 	DEBUG_CALL("tcp_input");
-	DEBUG_ARGS((dfd," m = %8lx  iphlen = %2d  inso = %lx\n",
+	DEBUG_ARGS((dfd, " m = %8lx  iphlen = %2d  inso = %lx\n",
 		    (long )m, iphlen, (long )inso ));
 
 	/*
@@ -316,16 +316,6 @@ tcp_input(struct mbuf *m, int iphlen, struct socket *inso)
 	m->m_data += sizeof(struct tcpiphdr)+off-sizeof(struct tcphdr);
 	m->m_len  -= sizeof(struct tcpiphdr)+off-sizeof(struct tcphdr);
 
-    if (slirp->restricted) {
-        for (ex_ptr = slirp->exec_list; ex_ptr; ex_ptr = ex_ptr->ex_next) {
-            if (ex_ptr->ex_fport == ti->ti_dport &&
-                ti->ti_dst.s_addr == ex_ptr->ex_addr.s_addr) {
-                break;
-            }
-        }
-        if (!ex_ptr)
-            goto drop;
-    }
 	/*
 	 * Locate pcb for segment.
 	 */
@@ -355,6 +345,22 @@ findso:
 	 * as if it was LISTENING, and continue...
 	 */
         if (so == NULL) {
+          if (slirp->restricted) {
+            /* Any hostfwds will have an existing socket, so we only get here
+             * for non-hostfwd connections. These should be dropped, unless it
+             * happens to be a guestfwd.
+             */
+            for (ex_ptr = slirp->exec_list; ex_ptr; ex_ptr = ex_ptr->ex_next) {
+                if (ex_ptr->ex_fport == ti->ti_dport &&
+                    ti->ti_dst.s_addr == ex_ptr->ex_addr.s_addr) {
+                    break;
+                }
+            }
+            if (!ex_ptr) {
+                goto dropwithreset;
+            }
+          }
+
 	  if ((tiflags & (TH_SYN|TH_FIN|TH_RST|TH_URG|TH_ACK)) != TH_SYN)
 	    goto dropwithreset;
 
@@ -451,7 +457,7 @@ findso:
 				acked = ti->ti_ack - tp->snd_una;
 				sbdrop(&so->so_snd, acked);
 				tp->snd_una = ti->ti_ack;
-				m_freem(m);
+				m_free(m);
 
 				/*
 				 * If all outstanding data are acked, stop
@@ -580,7 +586,7 @@ findso:
 
 	  if((tcp_fconnect(so) == -1) && (errno != EINPROGRESS) && (errno != EWOULDBLOCK)) {
 	    u_char code=ICMP_UNREACH_NET;
-	    DEBUG_MISC((dfd," tcp fconnect errno = %d-%s\n",
+	    DEBUG_MISC((dfd, " tcp fconnect errno = %d-%s\n",
 			errno,strerror(errno)));
 	    if(errno == ECONNREFUSED) {
 	      /* ACK the SYN, send RST to refuse the connection */
@@ -610,6 +616,7 @@ findso:
 	    so->so_ti = ti;
 	    tp->t_timer[TCPT_KEEP] = TCPTV_KEEP_INIT;
 	    tp->t_state = TCPS_SYN_RECEIVED;
+	    tcp_template(tp);
 	  }
 	  return;
 
@@ -910,7 +917,7 @@ trimthenstep6:
 
 		if (SEQ_LEQ(ti->ti_ack, tp->snd_una)) {
 			if (ti->ti_len == 0 && tiwin == tp->snd_wnd) {
-			  DEBUG_MISC((dfd," dup ack  m = %lx  so = %lx \n",
+			  DEBUG_MISC((dfd, " dup ack  m = %lx  so = %lx\n",
 				      (long )m, (long )so));
 				/*
 				 * If we have outstanding data (other than
@@ -1156,6 +1163,16 @@ step6:
 dodata:
 
 	/*
+	 * If this is a small packet, then ACK now - with Nagel
+	 *      congestion avoidance sender won't send more until
+	 *      he gets an ACK.
+	 */
+	if (ti->ti_len && (unsigned)ti->ti_len <= 5 &&
+	    ((struct tcpiphdr_2 *)ti)->first_char == (char)27) {
+		tp->t_flags |= TF_ACKNOW;
+	}
+
+	/*
 	 * Process the segment text, merging it into the TCP sequencing queue,
 	 * and arranging for acknowledgment of receipt if necessary.
 	 * This process logically involves adjusting tp->rcv_wnd as data
@@ -1234,18 +1251,6 @@ dodata:
 	}
 
 	/*
-	 * If this is a small packet, then ACK now - with Nagel
-	 *      congestion avoidance sender won't send more until
-	 *      he gets an ACK.
-	 *
-	 * See above.
-	 */
-	if (ti->ti_len && (unsigned)ti->ti_len <= 5 &&
-	    ((struct tcpiphdr_2 *)ti)->first_char == (char)27) {
-		tp->t_flags |= TF_ACKNOW;
-	}
-
-	/*
 	 * Return any desired output.
 	 */
 	if (needoutput || (tp->t_flags & TF_ACKNOW)) {
@@ -1260,7 +1265,7 @@ dropafterack:
 	 */
 	if (tiflags & TH_RST)
 		goto drop;
-	m_freem(m);
+	m_free(m);
 	tp->t_flags |= TF_ACKNOW;
 	(void) tcp_output(tp);
 	return;
@@ -1282,8 +1287,6 @@ drop:
 	 * Drop space held by incoming segment and return.
 	 */
 	m_free(m);
-
-	return;
 }
 
 static void
@@ -1293,7 +1296,7 @@ tcp_dooptions(struct tcpcb *tp, u_char *cp, int cnt, struct tcpiphdr *ti)
 	int opt, optlen;
 
 	DEBUG_CALL("tcp_dooptions");
-	DEBUG_ARGS((dfd," tp = %lx  cnt=%i \n", (long )tp, cnt));
+	DEBUG_ARGS((dfd, " tp = %lx  cnt=%i\n", (long)tp, cnt));
 
 	for (; cnt > 0; cnt -= optlen, cp += optlen) {
 		opt = cp[0];

@@ -1,0 +1,29 @@
+From: Alexander Graf <agraf@suse.de>
+Date: Mon, 6 Jun 2011 06:53:52 +0200
+Subject: console: add question-mark escape operator
+
+Some termcaps (found using SLES11SP1) use [? sequences. According to man
+console_codes (http://linux.die.net/man/4/console_codes) the question mark
+is a nop and should simply be ignored.
+
+This patch does exactly that, rendering screen output readable when
+outputting guest serial consoles to the graphical console emulator.
+
+Signed-off-by: Alexander Graf <agraf@suse.de>
+---
+ ui/console.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/ui/console.c b/ui/console.c
+index e3e8297..8784cd0 100644
+--- a/ui/console.c
++++ b/ui/console.c
+@@ -897,7 +897,7 @@ static void console_putchar(QemuConsole *s, int ch)
+         } else {
+             if (s->nb_esc_params < MAX_ESC_PARAMS)
+                 s->nb_esc_params++;
+-            if (ch == ';')
++            if (ch == ';' || ch == '?')
+                 break;
+ #ifdef DEBUG_CONSOLE
+             fprintf(stderr, "escape sequence CSI%d;%d%c, %d parameters\n",

@@ -62,8 +62,8 @@
 #define TARGET_NR_getpagesize         64 /* Common                                      */
 #define TARGET_NR_msync               65 /* Common in newer 1.3.x revs...               */
 #define TARGET_NR_vfork               66 /* Common                                      */
-#define TARGET_NR_pread               67 /* Linux Specific                              */
-#define TARGET_NR_pwrite              68 /* Linux Specific                              */
+#define TARGET_NR_pread64             67 /* Linux Specific */
+#define TARGET_NR_pwrite64            68 /* Linux Specific */
 #define TARGET_NR_geteuid32           69 /* Linux sparc32, sbrk under SunOS             */
 #define TARGET_NR_getegid32           70 /* Linux sparc32, sstk under SunOS             */
 #define TARGET_NR_mmap                71 /* Common                                      */
@@ -136,6 +136,7 @@
 #define TARGET_NR_utimes             138 /* SunOS Specific                              */
 #define TARGET_NR_stat64		139 /* Linux sparc32 Specific			   */
 #define TARGET_NR_getpeername        141 /* Common                                      */
+#define TARGET_NR_futex              142 /* gethostid under SunOS                       */
 #define TARGET_NR_gettid             143 /* ENOSYS under SunOS                          */
 #define TARGET_NR_getrlimit          144 /* Common                                      */
 #define TARGET_NR_setrlimit          145 /* Common                                      */
@@ -153,6 +154,7 @@
 #define TARGET_NR_getdomainname      162 /* SunOS Specific                              */
 #define TARGET_NR_setdomainname      163 /* Common                                      */
 #define TARGET_NR_quotactl           165 /* Common                                      */
+#define TARGET_NR_set_tid_address    166 /* Linux specific, exportfs under SunOS        */
 #define TARGET_NR_mount              167 /* Common                                      */
 #define TARGET_NR_ustat              168 /* Common                                      */
 #define TARGET_NR_getdents           174 /* Common                                      */
@@ -177,6 +179,7 @@
 #define TARGET_NR_readahead          205 /* Linux Specific                              */
 #define TARGET_NR_socketcall         206 /* Linux Specific                              */
 #define TARGET_NR_syslog             207 /* Linux Specific                              */
+#define TARGET_NR_tgkill             211 /* Linux Specific                              */
 #define TARGET_NR_waitpid            212 /* Linux Specific                              */
 #define TARGET_NR_swapoff            213 /* Linux Specific                              */
 #define TARGET_NR_sysinfo            214 /* Linux Specific                              */
@@ -197,6 +200,8 @@
 #define TARGET_NR__newselect         230 /* Linux Specific                              */
 #define TARGET_NR_time               231 /* Linux Specific                              */
 #define TARGET_NR_stime              233 /* Linux Specific                              */
+#define TARGET_NR_statfs64           234 /* Linux Specific                              */
+#define TARGET_NR_fstatfs64          235 /* Linux Specific                              */
 #define TARGET_NR__llseek            236 /* Linux Specific                              */
 #define TARGET_NR_mlock              237
 #define TARGET_NR_munlock            238
@@ -285,3 +290,15 @@
 #define TARGET_NR_pipe2		321
 #define TARGET_NR_inotify_init1	322
 #define TARGET_NR_accept4		323
+#define TARGET_NR_preadv                324
+#define TARGET_NR_pwritev               325
+#define TARGET_NR_rt_tgsigqueueinfo     326
+#define TARGET_NR_perf_event_open       327
+#define TARGET_NR_recvmmsg              328
+#define TARGET_NR_fanotify_init         329
+#define TARGET_NR_fanotify_mark         330
+#define TARGET_NR_prlimit64             331
+#define TARGET_NR_name_to_handle_at     332
+#define TARGET_NR_open_by_handle_at     333
+#define TARGET_NR_clock_adjtime         334
+#define TARGET_NR_syncfs                335

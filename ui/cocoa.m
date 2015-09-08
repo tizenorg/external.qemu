@@ -23,16 +23,20 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#include <crt_externs.h>
 
 #include "qemu-common.h"
-#include "console.h"
-#include "sysemu.h"
+#include "ui/console.h"
+#include "sysemu/sysemu.h"
 
 #ifndef MAC_OS_X_VERSION_10_4
 #define MAC_OS_X_VERSION_10_4 1040
 #endif
 #ifndef MAC_OS_X_VERSION_10_5
 #define MAC_OS_X_VERSION_10_5 1050
+#endif
+#ifndef MAC_OS_X_VERSION_10_6
+#define MAC_OS_X_VERSION_10_6 1060
 #endif
 
 
@@ -61,9 +65,7 @@ typedef struct {
     int bitsPerPixel;
 } QEMUScreen;
 
-int qemu_main(int argc, char **argv); // main defined in qemu/vl.c
 NSWindow *normalWindow;
-id cocoaView;
 static DisplayChangeListener *dcl;
 
 int gArgc;
@@ -265,7 +267,7 @@ static int cocoa_keycode_to_qemu(int keycode)
     BOOL isAbsoluteEnabled;
     BOOL isTabletEnabled;
 }
-- (void) resizeContentToWidth:(int)w height:(int)h displayState:(DisplayState *)ds;
+- (void) switchSurface:(DisplaySurface *)surface;
 - (void) grabMouse;
 - (void) ungrabMouse;
 - (void) toggleFullScreen:(id)sender;
@@ -277,6 +279,8 @@ static int cocoa_keycode_to_qemu(int keycode)
 - (float) cdy;
 - (QEMUScreen) gscreen;
 @end
+
+QemuCocoaView *cocoaView;
 
 @implementation QemuCocoaView
 - (id)initWithFrame:(NSRect)frameRect
@@ -398,19 +402,22 @@ static int cocoa_keycode_to_qemu(int keycode)
     }
 }
 
-- (void) resizeContentToWidth:(int)w height:(int)h displayState:(DisplayState *)ds
+- (void) switchSurface:(DisplaySurface *)surface
 {
-    COCOA_DEBUG("QemuCocoaView: resizeContent\n");
+    COCOA_DEBUG("QemuCocoaView: switchSurface\n");
+
+    int w = surface_width(surface);
+    int h = surface_height(surface);
 
     // update screenBuffer
     if (dataProviderRef)
         CGDataProviderRelease(dataProviderRef);
 
     //sync host window color space with guests
-	screen.bitsPerPixel = ds_get_bits_per_pixel(ds);
-	screen.bitsPerComponent = ds_get_bytes_per_pixel(ds) * 2;
+	screen.bitsPerPixel = surface_bits_per_pixel(surface);
+	screen.bitsPerComponent = surface_bytes_per_pixel(surface) * 2;
 
-    dataProviderRef = CGDataProviderCreateWithData(NULL, ds_get_data(ds), w * 4 * h, NULL);
+    dataProviderRef = CGDataProviderCreateWithData(NULL, surface_data(surface), w * 4 * h, NULL);
 
     // update windows
     if (isFullscreen) {
@@ -491,7 +498,7 @@ static int cocoa_keycode_to_qemu(int keycode)
                 if (keycode == 58 || keycode == 69) { // emulate caps lock and num lock keydown and keyup
                     kbd_put_keycode(keycode);
                     kbd_put_keycode(keycode | 0x80);
-                } else if (is_graphic_console()) {
+                } else if (qemu_console_is_graphic(NULL)) {
                     if (keycode & 0x80)
                         kbd_put_keycode(0xe0);
                     if (modifiers_state[keycode] == 0) { // keydown
@@ -531,7 +538,7 @@ static int cocoa_keycode_to_qemu(int keycode)
                 }
 
             // handle keys for graphic console
-            } else if (is_graphic_console()) {
+            } else if (qemu_console_is_graphic(NULL)) {
                 if (keycode & 0x80) //check bit for e0 in front
                     kbd_put_keycode(0xe0);
                 kbd_put_keycode(keycode & 0x7f); //remove e0 bit in front
@@ -574,7 +581,7 @@ static int cocoa_keycode_to_qemu(int keycode)
             break;
         case NSKeyUp:
             keycode = cocoa_keycode_to_qemu([event keyCode]);
-            if (is_graphic_console()) {
+            if (qemu_console_is_graphic(NULL)) {
                 if (keycode & 0x80)
                     kbd_put_keycode(0xe0);
                 kbd_put_keycode(keycode | 0x80); //add 128 to signal release of key
@@ -767,11 +774,22 @@ static int cocoa_keycode_to_qemu(int keycode)
         NSOpenPanel *op = [[NSOpenPanel alloc] init];
         [op setPrompt:@"Boot image"];
         [op setMessage:@"Select the disk image you want to boot.\n\nHit the \"Cancel\" button to quit"];
-        [op beginSheetForDirectory:nil file:nil types:[NSArray arrayWithObjects:@"img",@"iso",@"dmg",@"qcow",@"cow",@"cloop",@"vmdk",nil]
+        NSArray *filetypes = [NSArray arrayWithObjects:@"img", @"iso", @"dmg",
+                                 @"qcow", @"cow", @"cloop", @"vmdk", nil];
+#if (MAC_OS_X_VERSION_MAX_ALLOWED >= MAC_OS_X_VERSION_10_6)
+        [op setAllowedFileTypes:filetypes];
+        [op beginSheetModalForWindow:normalWindow
+            completionHandler:^(NSInteger returnCode)
+            { [self openPanelDidEnd:op
+                  returnCode:returnCode contextInfo:NULL ]; } ];
+#else
+        // Compatibility code for pre-10.6, using deprecated method
+        [op beginSheetForDirectory:nil file:nil types:filetypes
               modalForWindow:normalWindow modalDelegate:self
               didEndSelector:@selector(openPanelDidEnd:returnCode:contextInfo:) contextInfo:NULL];
+#endif
     } else {
-        // or Launch Qemu, with the global args
+        // or launch QEMU, with the global args
         [self startEmulationWithArgc:gArgc argv:(char **)gArgv];
     }
 }
@@ -794,7 +812,7 @@ static int cocoa_keycode_to_qemu(int keycode)
     COCOA_DEBUG("QemuCocoaAppController: startEmulationWithArgc\n");
 
     int status;
-    status = qemu_main(argc, argv);
+    status = qemu_main(argc, argv, *_NSGetEnviron());
     exit(status);
 }
 
@@ -806,13 +824,15 @@ static int cocoa_keycode_to_qemu(int keycode)
         exit(0);
     } else if(returnCode == NSOKButton) {
         const char *bin = "qemu";
-        char *img = (char*)[ [ sheet filename ] cStringUsingEncoding:NSASCIIStringEncoding];
+        char *img = (char*)[ [ [ sheet URL ] path ] cStringUsingEncoding:NSASCIIStringEncoding];
 
         char **argv = (char**)malloc( sizeof(char*)*3 );
 
-        asprintf(&argv[0], "%s", bin);
-        asprintf(&argv[1], "-hda");
-        asprintf(&argv[2], "%s", img);
+        [sheet close];
+
+        argv[0] = g_strdup_printf("%s", bin);
+        argv[1] = g_strdup_printf("-hda");
+        argv[2] = g_strdup_printf("%s", img);
 
         printf("Using argc %d argv %s -hda %s\n", 3, bin, img);
 
@@ -845,40 +865,40 @@ static int cocoa_keycode_to_qemu(int keycode)
 
 
 
-// Dock Connection
-typedef struct CPSProcessSerNum
-{
-        UInt32                lo;
-        UInt32                hi;
-} CPSProcessSerNum;
-
-OSErr CPSGetCurrentProcess( CPSProcessSerNum *psn);
-OSErr CPSEnableForegroundOperation( CPSProcessSerNum *psn, UInt32 _arg2, UInt32 _arg3, UInt32 _arg4, UInt32 _arg5);
-OSErr CPSSetFrontProcess( CPSProcessSerNum *psn);
-
 int main (int argc, const char * argv[]) {
 
     gArgc = argc;
     gArgv = (char **)argv;
-    CPSProcessSerNum PSN;
     int i;
 
     /* In case we don't need to display a window, let's not do that */
     for (i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-vnc") ||
-            !strcmp(argv[i], "-nographic") ||
-            !strcmp(argv[i], "-curses")) {
-                return qemu_main(gArgc, gArgv);
+        const char *opt = argv[i];
+
+        if (opt[0] == '-') {
+            /* Treat --foo the same as -foo.  */
+            if (opt[1] == '-') {
+                opt++;
+            }
+            if (!strcmp(opt, "-h") || !strcmp(opt, "-help") ||
+                !strcmp(opt, "-vnc") ||
+                !strcmp(opt, "-nographic") ||
+                !strcmp(opt, "-version") ||
+                !strcmp(opt, "-curses") ||
+                !strcmp(opt, "-qtest")) {
+                return qemu_main(gArgc, gArgv, *_NSGetEnviron());
+            }
         }
     }
 
     NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
-    [NSApplication sharedApplication];
 
-    if (!CPSGetCurrentProcess(&PSN))
-        if (!CPSEnableForegroundOperation(&PSN,0x03,0x3C,0x2C,0x1103))
-            if (!CPSSetFrontProcess(&PSN))
-                [NSApplication sharedApplication];
+    // Pull this console process up to being a fully-fledged graphical
+    // app with a menubar and Dock icon
+    ProcessSerialNumber psn = { 0, kCurrentProcess };
+    TransformProcessType(&psn, kProcessTransformToForegroundApplication);
+
+    [NSApplication sharedApplication];
 
     // Add menus
     NSMenu      *menu;
@@ -940,8 +960,11 @@ int main (int argc, const char * argv[]) {
 
 
 #pragma mark qemu
-static void cocoa_update(DisplayState *ds, int x, int y, int w, int h)
+static void cocoa_update(DisplayChangeListener *dcl,
+                         int x, int y, int w, int h)
 {
+    NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
+
     COCOA_DEBUG("qemu_cocoa: cocoa_update\n");
 
     NSRect rect;
@@ -955,17 +978,24 @@ static void cocoa_update(DisplayState *ds, int x, int y, int w, int h)
             h * [cocoaView cdy]);
     }
     [cocoaView setNeedsDisplayInRect:rect];
+
+    [pool release];
 }
 
-static void cocoa_resize(DisplayState *ds)
+static void cocoa_switch(DisplayChangeListener *dcl,
+                         DisplaySurface *surface)
 {
-    COCOA_DEBUG("qemu_cocoa: cocoa_resize\n");
+    NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
 
-    [cocoaView resizeContentToWidth:(int)(ds_get_width(ds)) height:(int)(ds_get_height(ds)) displayState:ds];
+    COCOA_DEBUG("qemu_cocoa: cocoa_switch\n");
+    [cocoaView switchSurface:surface];
+    [pool release];
 }
 
-static void cocoa_refresh(DisplayState *ds)
+static void cocoa_refresh(DisplayChangeListener *dcl)
 {
+    NSAutoreleasePool * pool = [[NSAutoreleasePool alloc] init];
+
     COCOA_DEBUG("qemu_cocoa: cocoa_refresh\n");
 
     if (kbd_mouse_is_absolute()) {
@@ -987,27 +1017,32 @@ static void cocoa_refresh(DisplayState *ds)
             [cocoaView handleEvent:event];
         }
     } while(event != nil);
-    vga_hw_update();
+    graphic_hw_update(NULL);
+    [pool release];
 }
 
 static void cocoa_cleanup(void)
 {
     COCOA_DEBUG("qemu_cocoa: cocoa_cleanup\n");
-	qemu_free(dcl);
+    g_free(dcl);
 }
+
+static const DisplayChangeListenerOps dcl_ops = {
+    .dpy_name          = "cocoa",
+    .dpy_gfx_update = cocoa_update,
+    .dpy_gfx_switch = cocoa_switch,
+    .dpy_refresh = cocoa_refresh,
+};
 
 void cocoa_display_init(DisplayState *ds, int full_screen)
 {
     COCOA_DEBUG("qemu_cocoa: cocoa_display_init\n");
 
-	dcl = qemu_mallocz(sizeof(DisplayChangeListener));
-	
-    // register vga output callbacks
-    dcl->dpy_update = cocoa_update;
-    dcl->dpy_resize = cocoa_resize;
-    dcl->dpy_refresh = cocoa_refresh;
+    dcl = g_malloc0(sizeof(DisplayChangeListener));
 
-	register_displaychangelistener(ds, dcl);
+    // register vga output callbacks
+    dcl->ops = &dcl_ops;
+    register_displaychangelistener(dcl);
 
     // register cleanup function
     atexit(cocoa_cleanup);
